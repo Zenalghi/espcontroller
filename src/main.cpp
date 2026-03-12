@@ -20,9 +20,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Adafruit_AHTX0 aht;
 bool aht_status = false;
 
-// Pin Relay (26, 25, 33, 32) - TIPE ACTIVE HIGH
+// Pin Relay (26, 25, 33, 32) - TIPE ACTIVE LOW
 const int RELAY_PINS[4] = {26, 25, 33, 32};
-bool relayState[4] = {false, false, false, false}; // false = OFF, true = ON
+bool relayState[4] = {false, false, false, false}; // false = OFF (HIGH), true = ON (LOW)
 
 // =========================================================
 // 2. KONFIGURASI JARINGAN & MQTT
@@ -42,7 +42,7 @@ volatile bool portalActive = false;
 volatile bool requestPortalOpen = false;
 volatile bool requestPortalClose = false;
 
-// Wadah Penampung Data Jikong (Persiapan Rumus EKF Skripsi)
+// Wadah Penampung Data Jikong (Persiapan Rumus EKF)
 struct BMS_EKF_Data
 {
   float voltage = 0.0;
@@ -62,7 +62,7 @@ String teksBerjalan(String teks, int batasKarakter = 21)
 {
   if (teks.length() <= batasKarakter)
     return teks;
-  int kecepatan = 300;
+  int kecepatan = 300; // milidetik
   int indeks = (millis() / kecepatan) % (teks.length() + 3);
   String teksGabung = teks + "   " + teks;
   return teksGabung.substring(indeks, indeks + batasKarakter);
@@ -120,6 +120,7 @@ void pantauSistem()
   static unsigned long waktuTerakhir = 0;
   const long jedaUpdate = 300;
 
+  // Logika non-blocking millis() untuk update layar
   if (millis() - waktuTerakhir >= jedaUpdate)
   {
     waktuTerakhir = millis();
@@ -183,19 +184,20 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       Serial.print("\n[MQTT] Perintah Relay Diterima: ");
       Serial.println(msg);
 
+      // LOGIKA ACTIVE LOW
       if (msg == "ON")
       {
         relayState[i] = true;
-        Serial.printf("[RELAY] Hardware Relay %d dihidupkan (Aktif HIGH)\n", i + 1);
+        Serial.printf("[RELAY] Hardware Relay %d dihidupkan (Aktif LOW: Pin = 0V)\n", i + 1);
       }
       else if (msg == "OFF")
       {
         relayState[i] = false;
-        Serial.printf("[RELAY] Hardware Relay %d dimatikan (LOW)\n", i + 1);
+        Serial.printf("[RELAY] Hardware Relay %d dimatikan (Aktif LOW: Pin = 3.3V)\n", i + 1);
       }
 
-      // Eksekusi ke Hardware (Active HIGH: true = HIGH, false = LOW)
-      digitalWrite(RELAY_PINS[i], relayState[i] ? HIGH : LOW);
+      // Eksekusi ke Hardware (Active LOW: true = LOW, false = HIGH)
+      digitalWrite(RELAY_PINS[i], relayState[i] ? LOW : HIGH);
 
       // Update status ke MQTT
       publishRelayState();
@@ -221,7 +223,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         bmsData.cells_v[i] = cells[i] | 0.0;
       }
 
-      // Print ini hanya untuk memastikan data masuk, bisa dikomen nanti kalau dirasa spam
       Serial.println("\n[BMS DATA] Sinkronisasi Memory EKF Sukses:");
       Serial.printf(" -> Volt : %.2f V | Amp: %.2f A | Suhu: %.1f C\n", bmsData.voltage, bmsData.current, bmsData.bat_temp1);
     }
@@ -341,7 +342,7 @@ void TaskNetwork(void *pvParameters)
       {
         ArduinoOTA.handle();
 
-        // Logic non-blocking untuk MQTT reconnect
+        // Logika non-blocking (millis) untuk MQTT reconnect
         if (!mqtt.connected())
         {
           if (lastMQTTState)
@@ -393,7 +394,7 @@ void cekTombolReset()
       else
         requestPortalClose = true;
 
-      // Mengunci eksekusi sampai tombol fisik dilepas
+      // Mengunci eksekusi sementara hanya sampai tombol fisik dilepas
       while (digitalRead(BUTTON_PIN) == LOW)
       {
         vTaskDelay(10);
@@ -411,6 +412,7 @@ void cekTombolReset()
     sedangDitekan = false;
   }
 }
+
 void setup()
 {
   Serial.begin(115200);
@@ -422,12 +424,12 @@ void setup()
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  // INIT RELAY (ACTIVE HIGH PROTECTION)
-  Serial.println("[RELAY] Menyiapkan perlindungan pin (Active HIGH)...");
+  // INIT RELAY (ACTIVE LOW PROTECTION)
+  Serial.println("[RELAY] Menyiapkan perlindungan pin (Active LOW)...");
   for (int i = 0; i < 4; i++)
   {
-    pinMode(RELAY_PINS[i], OUTPUT);
-    digitalWrite(RELAY_PINS[i], LOW); // Paksa pin jadi 0V (OFF) sebelum jadi OUTPUT
+    pinMode(RELAY_PINS[i], OUTPUT);    // Deklarasi fungsi pin dulu
+    digitalWrite(RELAY_PINS[i], HIGH); // Baru beri 3.3V (HIGH) agar relay OFF di awal
   }
 
   // =========================================================
