@@ -310,7 +310,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       }
       else
       {
-        dt = (now - last_mqtt_time) / 1000.0;
+        dt = 1.0;
       }
       last_mqtt_time = now;
       dt_last = dt;
