@@ -143,38 +143,49 @@ float get_dOCV_dSOC(float soc)
 
 void runEKFStep(float I_meas, float V_meas, float dt)
 {
+  // 1. Integrasi Coulomb Counting
   soc_cc = constrain(soc_cc - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
 
   float soc_prev = constrain(ekf_x[0], 0.0, 1.0);
   float vc1_prev = ekf_x[1];
 
+  // 2. Evaluasi Parameter Dinamis ECM
   float R0 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_r0, LUT_ECM_SIZE), 0.0001f);
   float R1 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_r1, LUT_ECM_SIZE), 0.0001f);
   float C1 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_c1, LUT_ECM_SIZE), 1.0f);
   float tau = max(R1 * C1, 0.000001f);
 
+  // =====================================
+  // TAHAP PREDIKSI (A PRIORI)
+  // =====================================
   float soc_pred = constrain(soc_prev - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
-  float alpha = (dt > 0) ? exp(-dt / tau) : 1.0;
-  float vc1_pred = (alpha * vc1_prev) + (R1 * (1.0 - alpha) * I_meas);
+  float alpha = (dt > 0) ? exp(-dt / tau) : 1.0f;
+  float vc1_pred = (alpha * vc1_prev) + (R1 * (1.0f - alpha) * I_meas);
 
   ekf_x[0] = soc_pred;
   ekf_x[1] = vc1_pred;
 
+  // Prediksi Matriks Kovariansi P_pred
   float P_pred[2][2];
   P_pred[0][0] = ekf_P[0][0] + Q_NOISE_00;
   P_pred[0][1] = ekf_P[0][1] * alpha;
   P_pred[1][0] = ekf_P[1][0] * alpha;
   P_pred[1][1] = (alpha * alpha * ekf_P[1][1]) + Q_NOISE_11;
 
+  // =====================================
+  // TAHAP UPDATE (A POSTERIORI)
+  // =====================================
   float OCV_pred = interpolate1D(soc_pred, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
 
   float V_pred = OCV_pred - vc1_pred - (I_meas * R0);
   v_pred_last = V_pred;
 
+  // Matriks Jacobian (H)
   float h0 = dOCV_dSOC;
-  float h1 = -1.0;
+  float h1 = -1.0f;
 
+  // Inovasi & Kalman Gain (K)
   float S = (h0 * h0 * P_pred[0][0]) + (h0 * h1 * P_pred[0][1]) +
             (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_NOISE;
 
@@ -182,14 +193,36 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   K[0] = ((P_pred[0][0] * h0) + (P_pred[0][1] * h1)) / S;
   K[1] = ((P_pred[1][0] * h0) + (P_pred[1][1] * h1)) / S;
 
+  // Koreksi State
   float error = V_meas - V_pred;
   ekf_x[0] = constrain(ekf_x[0] + (K[0] * error), 0.0, 1.0);
   ekf_x[1] = ekf_x[1] + (K[1] * error);
 
-  ekf_P[0][0] = (1.0 - K[0] * h0) * P_pred[0][0] - (K[0] * h1) * P_pred[1][0];
-  ekf_P[0][1] = (1.0 - K[0] * h0) * P_pred[0][1] - (K[0] * h1) * P_pred[1][1];
-  ekf_P[1][0] = (-K[1] * h0) * P_pred[0][0] + (1.0 - K[1] * h1) * P_pred[1][0];
-  ekf_P[1][1] = (-K[1] * h0) * P_pred[0][1] + (1.0 - K[1] * h1) * P_pred[1][1];
+  // ==============================================================
+  // PEMBARUAN KOVARIANSI EKF MENGGUNAKAN JOSEPH FORM YNG BENAR
+  // Rumus: P = (I - K*H) * P_pred * (I - K*H)^T + K * R_NOISE * K^T
+  // ==============================================================
+
+  // A. Hitung Matriks I_KH = (I - K*H)
+  float I_KH[2][2];
+  I_KH[0][0] = 1.0f - (K[0] * h0);
+  I_KH[0][1] = -(K[0] * h1);
+  I_KH[1][0] = -(K[1] * h0);
+  I_KH[1][1] = 1.0f - (K[1] * h1);
+
+  // B. Hitung Temp = I_KH * P_pred
+  float Temp[2][2];
+  Temp[0][0] = I_KH[0][0] * P_pred[0][0] + I_KH[0][1] * P_pred[1][0];
+  Temp[0][1] = I_KH[0][0] * P_pred[0][1] + I_KH[0][1] * P_pred[1][1];
+  Temp[1][0] = I_KH[1][0] * P_pred[0][0] + I_KH[1][1] * P_pred[1][0];
+  Temp[1][1] = I_KH[1][0] * P_pred[0][1] + I_KH[1][1] * P_pred[1][1];
+
+  // C. Selesaikan P = Temp * I_KH^T + (K * R_NOISE * K^T)
+  // Perhatikan bahwa I_KH^T berarti indeks baris & kolom dibalik (transpose)
+  ekf_P[0][0] = Temp[0][0] * I_KH[0][0] + Temp[0][1] * I_KH[0][1] + (K[0] * K[0] * R_NOISE);
+  ekf_P[0][1] = Temp[0][0] * I_KH[1][0] + Temp[0][1] * I_KH[1][1] + (K[0] * K[1] * R_NOISE);
+  ekf_P[1][0] = Temp[1][0] * I_KH[0][0] + Temp[1][1] * I_KH[0][1] + (K[1] * K[0] * R_NOISE);
+  ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_NOISE);
 }
 
 // =========================================================
