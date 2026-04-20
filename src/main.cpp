@@ -12,7 +12,7 @@
 // 1. KONFIGURASI HARDWARE (OLED, SENSOR, RELAY, TOMBOL)
 // =========================================================
 #define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32
+#define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
@@ -156,9 +156,7 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   float C1 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_c1, LUT_ECM_SIZE), 1.0f);
   float tau = max(R1 * C1, 0.000001f);
 
-  // =====================================
   // TAHAP PREDIKSI (A PRIORI)
-  // =====================================
   float soc_pred = constrain(soc_prev - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
   float alpha = (dt > 0) ? exp(-dt / tau) : 1.0f;
   float vc1_pred = (alpha * vc1_prev) + (R1 * (1.0f - alpha) * I_meas);
@@ -173,9 +171,7 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   P_pred[1][0] = ekf_P[1][0] * alpha;
   P_pred[1][1] = (alpha * alpha * ekf_P[1][1]) + Q_NOISE_11;
 
-  // =====================================
   // TAHAP UPDATE (A POSTERIORI)
-  // =====================================
   float OCV_pred = interpolate1D(soc_pred, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
 
@@ -448,7 +444,7 @@ void TaskNetwork(void *pvParameters)
 }
 
 // =========================================================
-// 10. TUGAS CORE 1: LAYAR MULTI-PAGE OLED & SMART BUTTON
+// 10. TUGAS CORE 1: LAYAR MULTI-PAGE OLED 128x64
 // =========================================================
 void bacaSensorAHT()
 {
@@ -470,161 +466,178 @@ void updateLayar()
   if (portalActive)
   {
     display.setCursor(0, 0);
-    display.print("=== SETUP MODE ===");
-    display.setCursor(0, 8);
-    display.print("WiFi: esp-setup");
+    display.print("==== SETUP MODE ====");
+    display.drawLine(0, 10, 128, 10, WHITE); // Garis bawah judul
+
     display.setCursor(0, 16);
+    display.print("WiFi: esp-setup");
+    display.setCursor(0, 26);
     display.print("Pass: 12345679");
-    display.setCursor(0, 24);
-    display.print("IP: 192.168.4.1");
+    display.setCursor(0, 36);
+    display.print("IP  : 192.168.4.1");
   }
   else if (currentPage == 1)
   {
     // Halaman 1: Main Dashboard
     display.setCursor(0, 0);
-    display.printf("Main | %.1fV | %.1fA", bmsData.voltage, bmsData.current);
-
-    display.setCursor(0, 8);
-    display.printf("CC: %.0f%% | EKF: %.0f%%", soc_cc * 100, ekf_x[0] * 100);
+    display.print("=== MAIN DASHBOARD ===");
+    display.drawLine(0, 10, 128, 10, WHITE);
 
     display.setCursor(0, 16);
-    display.printf("Relay:%s %s %s %s",
+    display.printf("Volt : %.1fV | %.1fA", bmsData.voltage, bmsData.current);
+    display.setCursor(0, 26);
+    display.printf("SOC  : CC:%.0f%% EKF:%.0f%%", soc_cc * 100, ekf_x[0] * 100);
+    display.setCursor(0, 36);
+    display.printf("Relay: %s %s %s %s",
                    relayState[0] ? "ON" : "OFF",
                    relayState[1] ? "ON" : "OFF",
                    relayState[2] ? "ON" : "OFF",
                    relayState[3] ? "ON" : "OFF");
-
-    display.setCursor(0, 24);
-    if (WiFi.status() == WL_CONNECTED)
-      display.print("WIFI OK ");
-    else
-      display.print("NO WIFI ");
-    if (mqtt.connected())
-      display.print("| MQTT OK");
-    else
-      display.print("| NO MQTT");
+    display.setCursor(0, 46);
+    display.printf("Net  : %s", WiFi.status() == WL_CONNECTED ? "WIFI OK" : "NO WIFI");
+    display.setCursor(0, 56);
+    display.printf("MQTT : %s", mqtt.connected() ? "CONNECTED" : "DISCONN");
   }
   else if (currentPage == 2)
   {
     // Halaman 2: Cell Diagnostics
     display.setCursor(0, 0);
-    display.printf("Cell | Avg: %.3f V", bmsData.avg_cell_v);
-    display.setCursor(0, 8);
-    display.printf("Max: %.3f Min: %.3f", bmsData.max_cell_v, bmsData.min_cell_v);
+    display.print("== CELL DIAGNOSTIC ==");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
     display.setCursor(0, 16);
-    display.printf("Delta (dV): %.3f V", bmsData.delta_v);
-    display.setCursor(0, 24);
-    display.printf("T.MOS: %.1f Bat: %.1f", bmsData.mos_temp, bmsData.bat_temp1);
+    display.printf("Avg Cell : %.3f V", bmsData.avg_cell_v);
+    display.setCursor(0, 26);
+    display.printf("Max Cell : %.3f V", bmsData.max_cell_v);
+    display.setCursor(0, 36);
+    display.printf("Min Cell : %.3f V", bmsData.min_cell_v);
+    display.setCursor(0, 46);
+    display.printf("Delta(dV): %.3f V", bmsData.delta_v);
+    display.setCursor(0, 56);
+    display.printf("Temp : MOS:%.1f B:%.1f", bmsData.mos_temp, bmsData.bat_temp1);
   }
   else if (currentPage == 3)
   {
     // Halaman 3: Environment & Power
     display.setCursor(0, 0);
-    display.printf("Env  | Pwr: %.0f W", bmsData.power);
-    display.setCursor(0, 8);
-    display.printf("R.Temp: %.1f C", room_temp);
+    display.print("==== ENV & POWER ====");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
     display.setCursor(0, 16);
-    display.printf("R.Hum : %.1f %%", room_hum);
-    display.setCursor(0, 24);
-    display.print(aht_status ? "Sensor AHT10: OK" : "Sensor AHT10: ERROR");
+    display.printf("Power  : %.0f W", bmsData.power);
+    display.setCursor(0, 26);
+    display.printf("Room T : %.1f C", room_temp);
+    display.setCursor(0, 36);
+    display.printf("Room H : %.1f %%", room_hum);
+    display.setCursor(0, 46);
+    display.print(aht_status ? "AHT10  : OK" : "AHT10  : ERROR");
   }
   else if (currentPage == 4)
   {
     // Halaman 4: Network & System
     display.setCursor(0, 0);
-    display.print("Net  | ");
-    if (WiFi.status() == WL_CONNECTED)
-      display.print(WiFi.SSID());
-    else
-      display.print("Disconnected");
-    display.setCursor(0, 8);
-    display.print("IP: ");
-    display.print(WiFi.localIP());
+    display.print("=== NETWORK & SYS ===");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
     display.setCursor(0, 16);
+    display.printf("WiFi : %s", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
+    display.setCursor(0, 26);
+    display.print("IP   : ");
+    display.print(WiFi.localIP());
+    display.setCursor(0, 36);
     display.printf("EKF dt: %.2f sec", dt_last);
-    display.setCursor(0, 24);
-    display.print("System OTA Ready");
+    display.setCursor(0, 46);
+    display.print("OTA  : Ready");
   }
   else if (currentPage == 5)
   {
     // Halaman 5: Voltase 8 Sel Baterai
     display.setCursor(0, 0);
-    display.printf("V1:%.3f  V2:%.3f", bmsData.cells_v[0], bmsData.cells_v[1]);
-    display.setCursor(0, 8);
-    display.printf("V3:%.3f  V4:%.3f", bmsData.cells_v[2], bmsData.cells_v[3]);
+    display.print("=== CELL VOLTAGES ===");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
     display.setCursor(0, 16);
+    display.printf("V1:%.3f  V2:%.3f", bmsData.cells_v[0], bmsData.cells_v[1]);
+    display.setCursor(0, 26);
+    display.printf("V3:%.3f  V4:%.3f", bmsData.cells_v[2], bmsData.cells_v[3]);
+    display.setCursor(0, 36);
     display.printf("V5:%.3f  V6:%.3f", bmsData.cells_v[4], bmsData.cells_v[5]);
-    display.setCursor(0, 24);
+    display.setCursor(0, 46);
     display.printf("V7:%.3f  V8:%.3f", bmsData.cells_v[6], bmsData.cells_v[7]);
   }
   else if (currentPage == 6)
   {
     // Halaman 6: Resistansi (Wire Res) 8 Sel Baterai
     display.setCursor(0, 0);
-    display.printf("R1:%.3f  R2:%.3f", bmsData.wire_res[0], bmsData.wire_res[1]);
-    display.setCursor(0, 8);
-    display.printf("R3:%.3f  R4:%.3f", bmsData.wire_res[2], bmsData.wire_res[3]);
+    display.print("=== WIRE RESISTOR ===");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
     display.setCursor(0, 16);
+    display.printf("R1:%.3f  R2:%.3f", bmsData.wire_res[0], bmsData.wire_res[1]);
+    display.setCursor(0, 26);
+    display.printf("R3:%.3f  R4:%.3f", bmsData.wire_res[2], bmsData.wire_res[3]);
+    display.setCursor(0, 36);
     display.printf("R5:%.3f  R6:%.3f", bmsData.wire_res[4], bmsData.wire_res[5]);
-    display.setCursor(0, 24);
+    display.setCursor(0, 46);
     display.printf("R7:%.3f  R8:%.3f", bmsData.wire_res[6], bmsData.wire_res[7]);
   }
 
   display.display();
 }
 
-// Fungsi Baru: Cetak isi OLED ke Serial Monitor
+// Cetak isi OLED ke Serial Monitor
 void printOledToSerial()
 {
-  Serial.println("----------------------------------------");
+  Serial.println("\n----------------------------------------");
   if (portalActive)
   {
-    Serial.println("=== SETUP MODE ===");
+    Serial.println("==== SETUP MODE ====");
     Serial.println("WiFi: esp-setup");
     Serial.println("Pass: 12345679");
-    Serial.println("IP: 192.168.4.1");
+    Serial.println("IP  : 192.168.4.1");
   }
   else if (currentPage == 1)
   {
-    Serial.printf("Main | %.1fV | %.1fA\n", bmsData.voltage, bmsData.current);
-    Serial.printf("CC: %.0f%% | EKF: %.0f%%\n", soc_cc * 100, ekf_x[0] * 100);
-    Serial.printf("Relay:%s %s %s %s\n",
+    Serial.println("=== MAIN DASHBOARD ===");
+    Serial.printf("Volt : %.1fV | %.1fA\n", bmsData.voltage, bmsData.current);
+    Serial.printf("SOC  : CC:%.0f%% EKF:%.0f%%\n", soc_cc * 100, ekf_x[0] * 100);
+    Serial.printf("Relay: %s %s %s %s\n",
                   relayState[0] ? "ON" : "OFF",
                   relayState[1] ? "ON" : "OFF",
                   relayState[2] ? "ON" : "OFF",
                   relayState[3] ? "ON" : "OFF");
-    Serial.printf("%s | %s\n",
-                  WiFi.status() == WL_CONNECTED ? "WIFI OK" : "NO WIFI",
-                  mqtt.connected() ? "MQTT OK" : "NO MQTT");
+    Serial.printf("Net  : %s\n", WiFi.status() == WL_CONNECTED ? "WIFI OK" : "NO WIFI");
+    Serial.printf("MQTT : %s\n", mqtt.connected() ? "CONNECTED" : "DISCONNECTED");
   }
   else if (currentPage == 2)
   {
-    Serial.printf("Cell | Avg: %.3f V\n", bmsData.avg_cell_v);
-    Serial.printf("Max: %.3f Min: %.3f\n", bmsData.max_cell_v, bmsData.min_cell_v);
-    Serial.printf("Delta (dV): %.3f V\n", bmsData.delta_v);
-    Serial.printf("T.MOS: %.1f Bat: %.1f\n", bmsData.mos_temp, bmsData.bat_temp1);
+    Serial.println("== CELL DIAGNOSTIC ==");
+    Serial.printf("Avg Cell : %.3f V\n", bmsData.avg_cell_v);
+    Serial.printf("Max Cell : %.3f V\n", bmsData.max_cell_v);
+    Serial.printf("Min Cell : %.3f V\n", bmsData.min_cell_v);
+    Serial.printf("Delta(dV): %.3f V\n", bmsData.delta_v);
+    Serial.printf("Temp : MOS:%.1f B:%.1f\n", bmsData.mos_temp, bmsData.bat_temp1);
   }
   else if (currentPage == 3)
   {
-    Serial.printf("Env  | Pwr: %.0f W\n", bmsData.power);
-    Serial.printf("R.Temp: %.1f C\n", room_temp);
-    Serial.printf("R.Hum : %.1f %%\n", room_hum);
-    Serial.printf("%s\n", aht_status ? "Sensor AHT10: OK" : "Sensor AHT10: ERROR");
+    Serial.println("==== ENV & POWER ====");
+    Serial.printf("Power  : %.0f W\n", bmsData.power);
+    Serial.printf("Room T : %.1f C\n", room_temp);
+    Serial.printf("Room H : %.1f %%\n", room_hum);
+    Serial.printf("AHT10  : %s\n", aht_status ? "OK" : "ERROR");
   }
   else if (currentPage == 4)
   {
-    Serial.print("Net  | ");
-    if (WiFi.status() == WL_CONNECTED)
-      Serial.println(WiFi.SSID());
-    else
-      Serial.println("Disconnected");
-    Serial.print("IP: ");
+    Serial.println("=== NETWORK & SYS ===");
+    Serial.printf("WiFi : %s\n", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
+    Serial.print("IP   : ");
     Serial.println(WiFi.localIP());
     Serial.printf("EKF dt: %.2f sec\n", dt_last);
-    Serial.println("System OTA Ready");
+    Serial.println("OTA  : Ready");
   }
   else if (currentPage == 5)
   {
+    Serial.println("=== CELL VOLTAGES ===");
     Serial.printf("V1:%.3f  V2:%.3f\n", bmsData.cells_v[0], bmsData.cells_v[1]);
     Serial.printf("V3:%.3f  V4:%.3f\n", bmsData.cells_v[2], bmsData.cells_v[3]);
     Serial.printf("V5:%.3f  V6:%.3f\n", bmsData.cells_v[4], bmsData.cells_v[5]);
@@ -632,6 +645,7 @@ void printOledToSerial()
   }
   else if (currentPage == 6)
   {
+    Serial.println("=== WIRE RESISTOR ===");
     Serial.printf("R1:%.3f  R2:%.3f\n", bmsData.wire_res[0], bmsData.wire_res[1]);
     Serial.printf("R3:%.3f  R4:%.3f\n", bmsData.wire_res[2], bmsData.wire_res[3]);
     Serial.printf("R5:%.3f  R6:%.3f\n", bmsData.wire_res[4], bmsData.wire_res[5]);
@@ -675,7 +689,7 @@ void cekTombolSmart()
           currentPage = 1;
         Serial.printf("\n[TOMBOL] Short Press -> Pindah Halaman %d\n", currentPage);
         updateLayar();
-        printOledToSerial(); // Memanggil fungsi cetak ke Serial
+        printOledToSerial();
       }
       sedangDitekan = false;
     }
