@@ -81,6 +81,7 @@ volatile bool portalActive = false;
 volatile bool requestPortalOpen = false;
 volatile bool requestPortalClose = false;
 volatile bool ota_updating = false;
+volatile int ota_progress_percent = 0;
 
 volatile int currentPage = 1;
 const int MAX_PAGES = 6;
@@ -400,58 +401,25 @@ void TaskNetwork(void *pvParameters)
 
   ArduinoOTA.onStart([]()
                      {
-    ota_updating = true; // Kunci layar
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(WHITE);
-    display.setCursor(0, 20);
-    display.print("OTA Update Dimulai...");
-    display.display(); });
+                       ota_updating = true;      // Aktifkan lock screen
+                       ota_progress_percent = 0; // Reset nilai persen
+                     });
 
   ArduinoOTA.onEnd([]()
                    {
-                     display.clearDisplay();
-                     display.setCursor(0, 20);
-                     display.print("OTA Selesai!");
-                     display.display();
-                     delay(1000); // Tahan sebentar sebelum otomatis restart
-                   });
+    // Memberikan waktu agar layar OTA (100%) sempat tergambar sebelum restart
+    delay(500); });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
                         {
-    unsigned int percent = (progress / (total / 100));
-    static unsigned int lastPercent = 200; // Simpan nilai persentase terakhir
-    
-    // HANYA update OLED jika angka persentase berubah (mencegah layar freeze/network timeout)
-    if (percent != lastPercent) 
-    {
-      lastPercent = percent;
-      
-      display.clearDisplay();
-      display.setCursor(0, 0);
-      display.print("==== OTA UPDATE ====");
-      display.drawLine(0, 10, 128, 10, WHITE);
-
-      display.setCursor(0, 20);
-      display.printf("Mengunduh: %u %%", percent);
-
-      // Menggambar Kotak Progress Bar
-      display.drawRect(14, 20, 100, 15, WHITE);
-      // Mengisi Kotak Progress Bar
-      display.fillRect(14, 20, percent, 15, WHITE);
-
-      display.display(); 
-    } });
+    // HANYA menghitung data matematis, JANGAN melakukan I2C (display) di sini!
+    // Supaya Task Jaringan di Core 0 tidak terblokir dan terhindar dari Timeout.
+    ota_progress_percent = (progress / (total / 100)); });
 
   ArduinoOTA.onError([](ota_error_t error)
                      {
-                       display.clearDisplay();
-                       display.setCursor(0, 20);
-                       display.printf("OTA Error[%u]", error);
-                       display.display();
-                       delay(3000);
-                       ota_updating = false; // Buka kunci layar jika gagal
-                     });
+    ota_updating = false; // Buka kunci layar jika gagal
+    Serial.printf("OTA Error[%u]", error); });
 
   ArduinoOTA.begin();
 
@@ -485,7 +453,6 @@ void TaskNetwork(void *pvParameters)
     {
       ArduinoOTA.handle();
 
-      // Matikan MQTT sementara jika sedang OTA supaya tidak tabrakan
       if (!ota_updating)
       {
         if (!mqtt.connected())
@@ -520,6 +487,23 @@ void bacaSensorAHT()
   }
 }
 
+// FUNGSI BARU: Menggambar Layar saat proses OTA berlangsung
+void drawOTAScreen(int percent)
+{
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("==== OTA UPDATE ====");
+  display.drawLine(0, 10, 128, 10, WHITE);
+
+  display.setCursor(0, 20);
+  display.printf("Mengunduh: %d %%", percent);
+
+  display.drawRect(14, 40, 100, 15, WHITE);
+  display.fillRect(14, 40, percent, 15, WHITE);
+
+  display.display();
+}
+
 void updateLayar()
 {
   display.clearDisplay();
@@ -530,7 +514,7 @@ void updateLayar()
   {
     display.setCursor(0, 0);
     display.print("==== SETUP MODE ====");
-    display.drawLine(0, 10, 128, 10, WHITE); // Garis bawah judul
+    display.drawLine(0, 10, 128, 10, WHITE);
 
     display.setCursor(0, 16);
     display.print("WiFi: esp-setup");
@@ -669,12 +653,8 @@ void printOledToSerial()
     Serial.println("=== MAIN DASHBOARD ===");
     Serial.printf("Volt : %.1fV | %.1fA\n", bmsData.voltage, bmsData.current);
     Serial.printf("SOC  : CC:%.0f%% EKF:%.0f%%\n", soc_cc * 100, ekf_x[0] * 100);
-
-    // Relay dibagi menjadi 2 baris untuk Serial Monitor
     Serial.printf("Relay1:%s | Relay2:%s\n", relayState[0] ? "ON " : "OFF", relayState[1] ? "ON " : "OFF");
     Serial.printf("Relay3:%s | Relay4:%s\n", relayState[2] ? "ON " : "OFF", relayState[3] ? "ON " : "OFF");
-
-    // WiFi & MQTT digabung dalam 1 baris
     char wifiSym = (WiFi.status() == WL_CONNECTED) ? 'V' : 'X';
     char mqttSym = mqtt.connected() ? 'V' : 'X';
     Serial.printf("WiFi [%c] | MQTT [%c]\n", wifiSym, mqttSym);
@@ -804,12 +784,18 @@ void setup()
 void loop()
 {
   static unsigned long waktuTerakhir = 0;
+  static int last_drawn_percent = -1;
 
-  // Jika sedang OTA, hentikan proses update UI (Lock Screen)
+  // Jika sedang OTA, alihkan fokus UI ke Progress Bar OTA (DIJALANKAN DI CORE 1)
   if (ota_updating)
   {
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-    return;
+    if (ota_progress_percent != last_drawn_percent)
+    {
+      last_drawn_percent = ota_progress_percent;
+      drawOTAScreen(ota_progress_percent);
+    }
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+    return; // Keluar dari loop agar tidak update halaman lain
   }
 
   if (millis() - waktuTerakhir >= 500)
