@@ -388,7 +388,7 @@ void reconnectMQTT()
 void TaskNetwork(void *pvParameters)
 {
   wm.setConfigPortalTimeout(180);
-  if (!wm.autoConnect("esp-setup", "12345679"))
+  if (!wm.autoConnect("Re", "12345679"))
   {
     delay(3000);
     ESP.restart();
@@ -488,15 +488,13 @@ void updateLayar()
     display.setCursor(0, 26);
     display.printf("SOC  : CC:%.0f%% EKF:%.0f%%", soc_cc * 100, ekf_x[0] * 100);
     display.setCursor(0, 36);
-    display.printf("Relay: %s %s %s %s",
-                   relayState[0] ? "ON" : "OFF",
-                   relayState[1] ? "ON" : "OFF",
-                   relayState[2] ? "ON" : "OFF",
-                   relayState[3] ? "ON" : "OFF");
+    display.printf(" Relay1:%-2s| Relay2:%s", relayState[0] ? "ON" : "X", relayState[1] ? "ON" : "X");
     display.setCursor(0, 46);
-    display.printf("Net  : %s", WiFi.status() == WL_CONNECTED ? "WIFI OK" : "NO WIFI");
+    display.printf(" Relay3:%-2s| Relay4:%s", relayState[2] ? "ON" : "X", relayState[3] ? "ON" : "X");
     display.setCursor(0, 56);
-    display.printf("MQTT : %s", mqtt.connected() ? "CONNECTED" : "DISCONN");
+    char wifiSym = (WiFi.status() == WL_CONNECTED) ? 'V' : 'X';
+    char mqttSym = mqtt.connected() ? 'V' : 'X';
+    display.printf(" WiFi [%c] | MQTT [%c]", wifiSym, mqttSym);
   }
   else if (currentPage == 2)
   {
@@ -557,13 +555,13 @@ void updateLayar()
     display.drawLine(0, 10, 128, 10, WHITE);
 
     display.setCursor(0, 16);
-    display.printf("V1:%.3f  V2:%.3f", bmsData.cells_v[0], bmsData.cells_v[1]);
+    display.printf(" V1:%.3f   V2:%.3f", bmsData.cells_v[0], bmsData.cells_v[1]);
     display.setCursor(0, 26);
-    display.printf("V3:%.3f  V4:%.3f", bmsData.cells_v[2], bmsData.cells_v[3]);
+    display.printf(" V3:%.3f   V4:%.3f", bmsData.cells_v[2], bmsData.cells_v[3]);
     display.setCursor(0, 36);
-    display.printf("V5:%.3f  V6:%.3f", bmsData.cells_v[4], bmsData.cells_v[5]);
+    display.printf(" V5:%.3f   V6:%.3f", bmsData.cells_v[4], bmsData.cells_v[5]);
     display.setCursor(0, 46);
-    display.printf("V7:%.3f  V8:%.3f", bmsData.cells_v[6], bmsData.cells_v[7]);
+    display.printf(" V7:%.3f   V8:%.3f", bmsData.cells_v[6], bmsData.cells_v[7]);
   }
   else if (currentPage == 6)
   {
@@ -573,13 +571,13 @@ void updateLayar()
     display.drawLine(0, 10, 128, 10, WHITE);
 
     display.setCursor(0, 16);
-    display.printf("R1:%.3f  R2:%.3f", bmsData.wire_res[0], bmsData.wire_res[1]);
+    display.printf(" R1:%.3f   R2:%.3f", bmsData.wire_res[0], bmsData.wire_res[1]);
     display.setCursor(0, 26);
-    display.printf("R3:%.3f  R4:%.3f", bmsData.wire_res[2], bmsData.wire_res[3]);
+    display.printf(" R3:%.3f   R4:%.3f", bmsData.wire_res[2], bmsData.wire_res[3]);
     display.setCursor(0, 36);
-    display.printf("R5:%.3f  R6:%.3f", bmsData.wire_res[4], bmsData.wire_res[5]);
+    display.printf(" R5:%.3f   R6:%.3f", bmsData.wire_res[4], bmsData.wire_res[5]);
     display.setCursor(0, 46);
-    display.printf("R7:%.3f  R8:%.3f", bmsData.wire_res[6], bmsData.wire_res[7]);
+    display.printf(" R7:%.3f   R8:%.3f", bmsData.wire_res[6], bmsData.wire_res[7]);
   }
 
   display.display();
@@ -601,13 +599,15 @@ void printOledToSerial()
     Serial.println("=== MAIN DASHBOARD ===");
     Serial.printf("Volt : %.1fV | %.1fA\n", bmsData.voltage, bmsData.current);
     Serial.printf("SOC  : CC:%.0f%% EKF:%.0f%%\n", soc_cc * 100, ekf_x[0] * 100);
-    Serial.printf("Relay: %s %s %s %s\n",
-                  relayState[0] ? "ON" : "OFF",
-                  relayState[1] ? "ON" : "OFF",
-                  relayState[2] ? "ON" : "OFF",
-                  relayState[3] ? "ON" : "OFF");
-    Serial.printf("Net  : %s\n", WiFi.status() == WL_CONNECTED ? "WIFI OK" : "NO WIFI");
-    Serial.printf("MQTT : %s\n", mqtt.connected() ? "CONNECTED" : "DISCONNECTED");
+
+    // Relay dibagi menjadi 2 baris untuk Serial Monitor
+    Serial.printf("Relay1:%s | Relay2:%s\n", relayState[0] ? "ON " : "OFF", relayState[1] ? "ON " : "OFF");
+    Serial.printf("Relay3:%s | Relay4:%s\n", relayState[2] ? "ON " : "OFF", relayState[3] ? "ON " : "OFF");
+
+    // WiFi & MQTT digabung dalam 1 baris
+    char wifiSym = (WiFi.status() == WL_CONNECTED) ? 'V' : 'X';
+    char mqttSym = mqtt.connected() ? 'V' : 'X';
+    Serial.printf("WiFi [%c] | MQTT [%c]\n", wifiSym, mqttSym);
   }
   else if (currentPage == 2)
   {
@@ -638,18 +638,18 @@ void printOledToSerial()
   else if (currentPage == 5)
   {
     Serial.println("=== CELL VOLTAGES ===");
-    Serial.printf("V1:%.3f  V2:%.3f\n", bmsData.cells_v[0], bmsData.cells_v[1]);
-    Serial.printf("V3:%.3f  V4:%.3f\n", bmsData.cells_v[2], bmsData.cells_v[3]);
-    Serial.printf("V5:%.3f  V6:%.3f\n", bmsData.cells_v[4], bmsData.cells_v[5]);
-    Serial.printf("V7:%.3f  V8:%.3f\n", bmsData.cells_v[6], bmsData.cells_v[7]);
+    Serial.printf("V1:%.3f   V2:%.3f\n", bmsData.cells_v[0], bmsData.cells_v[1]);
+    Serial.printf("V3:%.3f   V4:%.3f\n", bmsData.cells_v[2], bmsData.cells_v[3]);
+    Serial.printf("V5:%.3f   V6:%.3f\n", bmsData.cells_v[4], bmsData.cells_v[5]);
+    Serial.printf("V7:%.3f   V8:%.3f\n", bmsData.cells_v[6], bmsData.cells_v[7]);
   }
   else if (currentPage == 6)
   {
     Serial.println("=== WIRE RESISTOR ===");
-    Serial.printf("R1:%.3f  R2:%.3f\n", bmsData.wire_res[0], bmsData.wire_res[1]);
-    Serial.printf("R3:%.3f  R4:%.3f\n", bmsData.wire_res[2], bmsData.wire_res[3]);
-    Serial.printf("R5:%.3f  R6:%.3f\n", bmsData.wire_res[4], bmsData.wire_res[5]);
-    Serial.printf("R7:%.3f  R8:%.3f\n", bmsData.wire_res[6], bmsData.wire_res[7]);
+    Serial.printf("R1:%.3f   R2:%.3f\n", bmsData.wire_res[0], bmsData.wire_res[1]);
+    Serial.printf("R3:%.3f   R4:%.3f\n", bmsData.wire_res[2], bmsData.wire_res[3]);
+    Serial.printf("R5:%.3f   R6:%.3f\n", bmsData.wire_res[4], bmsData.wire_res[5]);
+    Serial.printf("R7:%.3f   R8:%.3f\n", bmsData.wire_res[6], bmsData.wire_res[7]);
   }
   Serial.println("----------------------------------------");
 }
