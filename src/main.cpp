@@ -420,21 +420,28 @@ void TaskNetwork(void *pvParameters)
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
                         {
     unsigned int percent = (progress / (total / 100));
+    static unsigned int lastPercent = 200; // Simpan nilai persentase terakhir
     
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.print("==== OTA UPDATE ====");
-    display.drawLine(0, 10, 128, 10, WHITE);
+    // HANYA update OLED jika angka persentase berubah (mencegah layar freeze/network timeout)
+    if (percent != lastPercent) 
+    {
+      lastPercent = percent;
+      
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.print("==== OTA UPDATE ====");
+      display.drawLine(0, 10, 128, 10, WHITE);
 
-    display.setCursor(0, 20);
-    display.printf("Mengunduh: %u %%", percent);
+      display.setCursor(0, 20);
+      display.printf("Mengunduh: %u %%", percent);
 
-    // Menggambar Kotak Progress Bar
-    display.drawRect(14, 40, 100, 15, WHITE);
-    // Mengisi Kotak Progress Bar
-    display.fillRect(14, 40, percent, 15, WHITE);
+      // Menggambar Kotak Progress Bar
+      display.drawRect(14, 20, 100, 15, WHITE);
+      // Mengisi Kotak Progress Bar
+      display.fillRect(14, 20, percent, 15, WHITE);
 
-    display.display(); });
+      display.display(); 
+    } });
 
   ArduinoOTA.onError([](ota_error_t error)
                      {
@@ -601,7 +608,7 @@ void updateLayar()
     display.setCursor(0, 16);
     display.printf("WiFi : %s", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
     display.setCursor(0, 26);
-    display.print("IP   : ");
+    display.print("IP   :");
     display.print(WiFi.localIP());
     display.setCursor(0, 36);
     display.printf("EKF dt: %.2f sec", dt_last);
