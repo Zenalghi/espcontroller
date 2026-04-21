@@ -293,7 +293,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       if (msg == "ON" && i < 3 && ekf_x[0] < 0.20)
       {
-        Serial.println("[PROTEKSI] Ditolak! SOC Baterai di bawah 20%");
+        Serial.println("[PROTECTION] Denied! Battery SOC below 20%");
         return;
       }
       setRelay(i, (msg == "ON"));
@@ -360,7 +360,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       {
         if (relayState[0] || relayState[1] || relayState[2])
         {
-          Serial.println("\n⚠️ [WARNING] SOC < 20%! MEMUTUS BEBAN SECARA OTOMATIS!");
+          Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF THE LOAD!");
           setRelay(1, false);
           setRelay(2, false);
           setRelay(3, false);
@@ -496,10 +496,13 @@ void drawOTAScreen(int percent)
   display.drawLine(0, 10, 128, 10, WHITE);
 
   display.setCursor(0, 20);
-  display.printf("Mengunduh: %d %%", percent);
+  display.printf("Downloading: %d %%", percent);
 
-  display.drawRect(14, 40, 100, 15, WHITE);
-  display.fillRect(14, 40, percent, 15, WHITE);
+  display.drawRect(14, 40, 100, 10, WHITE);
+  display.fillRect(14, 40, percent, 10, WHITE);
+  // jangan matikan
+  display.setCursor(0, 56);
+  display.print("Please wait...");
 
   display.display();
 }
@@ -721,7 +724,7 @@ void cekTombolSmart()
     else if ((millis() - waktuTekan > 5000) && !longPressTriggered)
     {
       longPressTriggered = true;
-      Serial.println("[TOMBOL] Long Press Terdeteksi -> Toggle WiFi Portal");
+      Serial.println("[BUTTON] Long Press Detected -> Toggle WiFi Portal");
       if (!portalActive)
         requestPortalOpen = true;
       else
@@ -740,13 +743,13 @@ void cekTombolSmart()
           currentPage++;
           if (currentPage > MAX_PAGES)
             currentPage = 1;
-          Serial.printf("\n[TOMBOL] Short Press -> Pindah Halaman %d\n", currentPage);
+          Serial.printf("\n[BUTTON] Short Press -> Change Page %d\n", currentPage);
           updateLayar();
           printOledToSerial();
         }
         else
         {
-          Serial.println("\n[TOMBOL] Short Press diabaikan karena sedang di Setup/OTA Mode");
+          Serial.println("\n[BUTTON] Short Press ignored because it is in Setup/OTA Mode");
         }
       }
       sedangDitekan = false;
@@ -771,7 +774,7 @@ void setup()
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   {
-    Serial.println("OLED Gagal!");
+    Serial.println("OLED Failed!");
     for (;;)
       ;
   }
