@@ -33,7 +33,7 @@ bool relayState[4] = {false, false, false, false};
 // =========================================================
 const char *mqtt_server = "broker.mqtt.cool";
 const int mqtt_port = 1883;
-const char *mqtt_prefix = "bms_panel1/260216";
+const char *mqtt_prefix = "bms_panel/2602165";
 
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -537,8 +537,8 @@ void drawOTAScreen(int percent)
   display.setCursor(0, 20);
   display.printf("Downloading: %d %%", percent);
 
-  display.drawRect(14, 40, 100, 10, WHITE);
-  display.fillRect(14, 40, percent, 10, WHITE);
+  display.drawRect(14, 37, 100, 10, WHITE);
+  display.fillRect(14, 37, percent, 10, WHITE);
   // jangan matikan
   display.setCursor(0, 56);
   display.print("Please wait...");
