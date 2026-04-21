@@ -475,6 +475,11 @@ void updateLayar()
     display.print("Pass: 12345679");
     display.setCursor(0, 36);
     display.print("IP  : 192.168.4.1");
+    // Data Sensor AHT10
+    display.setCursor(0, 46);
+    display.printf("Temp: %.1f C", room_temp);
+    display.setCursor(0, 56);
+    display.printf("Hum : %.1f %%", room_hum);
   }
   else if (currentPage == 1)
   {
@@ -593,6 +598,8 @@ void printOledToSerial()
     Serial.println("WiFi: esp-setup");
     Serial.println("Pass: 12345679");
     Serial.println("IP  : 192.168.4.1");
+    Serial.printf("Temp: %.1f C\n", room_temp);
+    Serial.printf("Hum : %.1f %%\n", room_hum);
   }
   else if (currentPage == 1)
   {
@@ -629,11 +636,11 @@ void printOledToSerial()
   else if (currentPage == 4)
   {
     Serial.println("=== NETWORK & SYS ===");
-    Serial.printf("WiFi : %s\n", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
-    Serial.print("IP   : ");
+    Serial.printf("WiFi :%s\n", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
+    Serial.print("IP   :");
     Serial.println(WiFi.localIP());
-    Serial.printf("EKF dt: %.2f sec\n", dt_last);
-    Serial.println("OTA  : Ready");
+    Serial.printf("EKF dt:%.2f sec\n", dt_last);
+    Serial.println("OTA  :Ready");
   }
   else if (currentPage == 5)
   {
@@ -684,12 +691,20 @@ void cekTombolSmart()
     {
       if (!longPressTriggered && (millis() - waktuTekan < 1000))
       {
-        currentPage++;
-        if (currentPage > MAX_PAGES)
-          currentPage = 1;
-        Serial.printf("\n[TOMBOL] Short Press -> Pindah Halaman %d\n", currentPage);
-        updateLayar();
-        printOledToSerial();
+        // Kunci navigasi halaman jika portal aktif
+        if (!portalActive)
+        {
+          currentPage++;
+          if (currentPage > MAX_PAGES)
+            currentPage = 1;
+          Serial.printf("\n[TOMBOL] Short Press -> Pindah Halaman %d\n", currentPage);
+          updateLayar();
+          printOledToSerial();
+        }
+        else
+        {
+          Serial.println("\n[TOMBOL] Short Press diabaikan karena sedang di Setup Mode");
+        }
       }
       sedangDitekan = false;
     }
