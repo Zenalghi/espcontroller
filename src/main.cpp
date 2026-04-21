@@ -80,6 +80,7 @@ const float R_NOISE = 1e-4;
 volatile bool portalActive = false;
 volatile bool requestPortalOpen = false;
 volatile bool requestPortalClose = false;
+volatile bool ota_updating = false;
 
 volatile int currentPage = 1;
 const int MAX_PAGES = 6;
@@ -394,7 +395,57 @@ void TaskNetwork(void *pvParameters)
     ESP.restart();
   }
 
+  // --- KONFIGURASI ARDUINO OTA ---
   ArduinoOTA.setHostname("esp-bms-ekf");
+
+  ArduinoOTA.onStart([]()
+                     {
+    ota_updating = true; // Kunci layar
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 20);
+    display.print("OTA Update Dimulai...");
+    display.display(); });
+
+  ArduinoOTA.onEnd([]()
+                   {
+                     display.clearDisplay();
+                     display.setCursor(0, 20);
+                     display.print("OTA Selesai!");
+                     display.display();
+                     delay(1000); // Tahan sebentar sebelum otomatis restart
+                   });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                        {
+    unsigned int percent = (progress / (total / 100));
+    
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("==== OTA UPDATE ====");
+    display.drawLine(0, 10, 128, 10, WHITE);
+
+    display.setCursor(0, 20);
+    display.printf("Mengunduh: %u %%", percent);
+
+    // Menggambar Kotak Progress Bar
+    display.drawRect(14, 40, 100, 15, WHITE);
+    // Mengisi Kotak Progress Bar
+    display.fillRect(14, 40, percent, 15, WHITE);
+
+    display.display(); });
+
+  ArduinoOTA.onError([](ota_error_t error)
+                     {
+                       display.clearDisplay();
+                       display.setCursor(0, 20);
+                       display.printf("OTA Error[%u]", error);
+                       display.display();
+                       delay(3000);
+                       ota_updating = false; // Buka kunci layar jika gagal
+                     });
+
   ArduinoOTA.begin();
 
   mqtt.setServer(mqtt_server, mqtt_port);
@@ -426,17 +477,22 @@ void TaskNetwork(void *pvParameters)
     else if (currentWiFiState)
     {
       ArduinoOTA.handle();
-      if (!mqtt.connected())
+
+      // Matikan MQTT sementara jika sedang OTA supaya tidak tabrakan
+      if (!ota_updating)
       {
-        if (millis() - lastMqttReconnectAttempt > 5000)
+        if (!mqtt.connected())
         {
-          lastMqttReconnectAttempt = millis();
-          reconnectMQTT();
+          if (millis() - lastMqttReconnectAttempt > 5000)
+          {
+            lastMqttReconnectAttempt = millis();
+            reconnectMQTT();
+          }
         }
-      }
-      else
-      {
-        mqtt.loop();
+        else
+        {
+          mqtt.loop();
+        }
       }
     }
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -691,8 +747,8 @@ void cekTombolSmart()
     {
       if (!longPressTriggered && (millis() - waktuTekan < 1000))
       {
-        // Kunci navigasi halaman jika portal aktif
-        if (!portalActive)
+        // Kunci navigasi halaman jika portal aktif ATAU OTA berjalan
+        if (!portalActive && !ota_updating)
         {
           currentPage++;
           if (currentPage > MAX_PAGES)
@@ -703,7 +759,7 @@ void cekTombolSmart()
         }
         else
         {
-          Serial.println("\n[TOMBOL] Short Press diabaikan karena sedang di Setup Mode");
+          Serial.println("\n[TOMBOL] Short Press diabaikan karena sedang di Setup/OTA Mode");
         }
       }
       sedangDitekan = false;
@@ -741,6 +797,14 @@ void setup()
 void loop()
 {
   static unsigned long waktuTerakhir = 0;
+
+  // Jika sedang OTA, hentikan proses update UI (Lock Screen)
+  if (ota_updating)
+  {
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    return;
+  }
+
   if (millis() - waktuTerakhir >= 500)
   {
     waktuTerakhir = millis();
