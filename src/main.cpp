@@ -33,7 +33,7 @@ bool relayState[4] = {false, false, false, false};
 // =========================================================
 const char *mqtt_server = "broker.mqtt.cool";
 const int mqtt_port = 1883;
-const char *mqtt_prefix = "bms_panel/260216";
+const char *mqtt_prefix = "bms_panel1/260216";
 
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -291,15 +291,50 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     String cmdTopic = String(mqtt_prefix) + "/switch/relay_" + String(i + 1) + "/command";
     if (topicStr == cmdTopic)
     {
-      if (msg == "ON" && i < 3 && ekf_x[0] < 0.20)
+      // Perubahan: i > 0 berarti ini akan memproteksi (menolak) ON untuk Relay 2, 3, dan 4 (index 1, 2, 3)
+      // Jika SOC di bawah 20%. Relay 1 (index 0) dikecualikan dan boleh dihidupkan.
+      if (msg == "ON" && i > 0 && ekf_x[0] < 0.20)
       {
-        Serial.println("[PROTECTION] Denied! Battery SOC below 20%");
+        Serial.println("[PROTECTION] Denied! Battery SOC below 20%. Only Relay 1 is allowed.");
         return;
       }
       setRelay(i, (msg == "ON"));
       return;
     }
   }
+
+  // --- Ganti Halaman OLED via MQTT ---
+  String pageCmdTopic = String(mqtt_prefix) + "/display/page/command";
+  if (topicStr == pageCmdTopic)
+  {
+    if (!portalActive && !ota_updating) // Hanya bisa ganti jika tidak sedang setup/OTA
+    {
+      if (msg == "NEXT")
+      {
+        currentPage++;
+        if (currentPage > MAX_PAGES)
+          currentPage = 1;
+        Serial.printf("\n[MQTT] Move Page-> %d\n", currentPage);
+      }
+      else
+      {
+        int p = msg.toInt();
+        if (p >= 1 && p <= MAX_PAGES)
+        {
+          currentPage = p;
+          Serial.printf("\n[MQTT] Jump to Page -> %d\n", currentPage);
+        }
+      }
+      // Kita tidak perlu memanggil updateLayar() di sini agar tidak tabrakan (Crash) I2C di Core 0.
+      // Layar akan otomatis di-refresh oleh fungsi loop() di Core 1 dalam waktu maksimal 0.5 detik.
+    }
+    else
+    {
+      Serial.println("\n[MQTT] Change Page rejected (In Setup/OTA Mode)");
+    }
+    return;
+  }
+  // -----------------------------------------------
 
   if (topicStr == String(mqtt_prefix) + "/data/main")
   {
@@ -358,12 +393,14 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 
       if (ekf_x[0] < 0.20)
       {
-        if (relayState[0] || relayState[1] || relayState[2])
+        // Perubahan: Mengecek dan mematikan HANYA Relay 2, 3, dan 4 (indeks 1, 2, 3)
+        // Relay 1 (indeks 0) dibiarkan menyala jika sedang menyala.
+        if (relayState[1] || relayState[2] || relayState[3])
         {
-          Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF THE LOAD!");
-          setRelay(1, false);
-          setRelay(2, false);
-          setRelay(3, false);
+          Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF LOAD 2, 3, AND 4!");
+          setRelay(1, false); // Matikan Relay 2
+          setRelay(2, false); // Matikan Relay 3
+          setRelay(3, false); // Matikan Relay 4
         }
       }
     }
@@ -379,6 +416,8 @@ void reconnectMQTT()
     {
       mqtt.subscribe((String(mqtt_prefix) + "/switch/relay_" + String(i) + "/command").c_str());
     }
+    // --- Subscribe ke topik ganti halaman OLED ---
+    mqtt.subscribe((String(mqtt_prefix) + "/display/page/command").c_str());
     mqtt.subscribe((String(mqtt_prefix) + "/data/main").c_str());
     publishRelayState();
   }
