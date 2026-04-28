@@ -91,8 +91,9 @@ struct BMS_Data
   float voltage = 0.0;
   float current = 0.0;
   float power = 0.0;
-  float bat_temp1 = 0.0;
   float mos_temp = 0.0;
+  float bat_temp1 = 0.0;
+  float bat_temp2 = 0.0; // Tambahan variabel bat_temp2
   float cells_v[8] = {0};
   float wire_res[8] = {0};
   float avg_cell_v = 0.0;
@@ -345,6 +346,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       bmsData.voltage = doc["voltage"] | 0.0;
       bmsData.bat_temp1 = doc["bat_temp1"] | 0.0;
+      bmsData.bat_temp2 = doc["bat_temp2"] | 0.0; // Parsing nilai bat_temp2
       bmsData.mos_temp = doc["mos_temp"] | 0.0;
       bmsData.power = doc["power"] | 0.0;
       bmsData.current = doc["current"] | 0.0;
@@ -599,14 +601,19 @@ void updateLayar()
 
     display.setCursor(0, 16);
     display.printf("Avg Cell : %.3f V", bmsData.avg_cell_v);
+
+    // Gabung Max dan Min agar hemat tempat
     display.setCursor(0, 26);
-    display.printf("Max Cell : %.3f V", bmsData.max_cell_v);
+    display.printf("Max:%.3f Min:%.3f", bmsData.max_cell_v, bmsData.min_cell_v);
+
     display.setCursor(0, 36);
-    display.printf("Min Cell : %.3f V", bmsData.min_cell_v);
-    display.setCursor(0, 46);
     display.printf("Delta(dV): %.3f V", bmsData.delta_v);
+
+    // Pisahkan Suhu MOS dan Baterai (T1 & T2)
+    display.setCursor(0, 46);
+    display.printf("Temp MOS : %.1f C", bmsData.mos_temp);
     display.setCursor(0, 56);
-    display.printf("Temp : MOS:%.1f B:%.1f", bmsData.mos_temp, bmsData.bat_temp1);
+    display.printf("Bat T1:%.1f T2:%.1f", bmsData.bat_temp1, bmsData.bat_temp2);
   }
   else if (currentPage == 3)
   {
@@ -705,10 +712,12 @@ void printOledToSerial()
   {
     Serial.println("== CELL DIAGNOSTIC ==");
     Serial.printf("Avg Cell : %.3f V\n", bmsData.avg_cell_v);
-    Serial.printf("Max Cell : %.3f V\n", bmsData.max_cell_v);
-    Serial.printf("Min Cell : %.3f V\n", bmsData.min_cell_v);
+
+    // Penyesuaian Serial monitor agar selaras dengan OLED
+    Serial.printf("Max:%.3f Min:%.3f\n", bmsData.max_cell_v, bmsData.min_cell_v);
     Serial.printf("Delta(dV): %.3f V\n", bmsData.delta_v);
-    Serial.printf("Temp : MOS:%.1f B:%.1f\n", bmsData.mos_temp, bmsData.bat_temp1);
+    Serial.printf("Temp MOS : %.1f C\n", bmsData.mos_temp);
+    Serial.printf("Bat T1:%.1f C | T2:%.1f C\n", bmsData.bat_temp1, bmsData.bat_temp2);
   }
   else if (currentPage == 3)
   {
