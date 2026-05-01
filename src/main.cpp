@@ -102,8 +102,14 @@ struct BMS_Data
   float delta_v = 0.0;
 } bmsData;
 
-float soc_cc = 0.9414;
-float ekf_x[2] = {0.9414, 0.0};
+// --- SETTING INISIALISASI SOC AWAL ---
+// Ubah nilai ini sesuai tujuan pengujian skripsi Anda:
+// 0.0000 -> Skenario 1 (Charging) jika ingin CC & EKF mulai benar dari 0%
+// 1.0000 -> Skenario 2 (Discharge) jika mulai dari baterai penuh 100%
+// 0.9414 -> Skenario 3 Atau Tes Uji Konvergensi (Salah tebak awal)(Urban Load)
+float soc_cc = 0;
+float ekf_x[2] = {0, 0.0};
+//--------------------------------------------------
 float ekf_P[2][2] = {{0.01, 0.0}, {0.0, 0.01}};
 float v_pred_last = 0.0;
 float dt_last = 0.0;
