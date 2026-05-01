@@ -83,6 +83,10 @@ volatile bool requestPortalClose = false;
 volatile bool ota_updating = false;
 volatile int ota_progress_percent = 0;
 
+// === FLAG UNTUK MENJAGA STABILITAS MQTT BUFFER ===
+volatile bool flag_run_ekf = false;
+volatile bool flag_publish_relay = false;
+
 volatile int currentPage = 1;
 const int MAX_PAGES = 6;
 
@@ -253,7 +257,7 @@ void publishRelayState()
   char buffer[200];
   serializeJson(doc, buffer);
   String topic = String(mqtt_prefix) + "/state/relays";
-  mqtt.publish(topic.c_str(), buffer, true);
+  mqtt.publish(topic.c_str(), buffer, false);
 }
 
 void publishComputedData(float dt)
@@ -279,12 +283,13 @@ void setRelay(int index, bool state)
   {
     relayState[index] = state;
     digitalWrite(RELAY_PINS[index], state ? LOW : HIGH);
-    publishRelayState();
+    // Kita panggil flag agar dikirim saat buffer jaringan aman
+    flag_publish_relay = true;
   }
 }
 
 // =========================================================
-// 8. MQTT CALLBACK (PARSING -> MATH -> PUBLISH -> PROTECT)
+// 8. MQTT CALLBACK (HANYA MENGUBAH FLAG, DILARANG PUBLISH DISINI)
 // =========================================================
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -342,7 +347,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     return;
   }
 
-  // --- MENERIMA DATA SENSOR DARI BMS JIKONG ---
+  // --- TERIMA DATA HiL ZKETECH ---
   if (topicStr == String(mqtt_prefix) + "/data/main")
   {
     JsonDocument doc;
@@ -382,35 +387,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       bmsData.min_cell_v = min_v;
       bmsData.delta_v = max_v - min_v;
 
-      unsigned long now = millis();
-      float dt = 0.0;
-      if (is_first_run)
-      {
-        dt = 1.0;
-        is_first_run = false;
-      }
-      else
-      {
-        dt = 1.0;
-      }
-      last_mqtt_time = now;
-      dt_last = dt;
-
-      // Jalankan Engine EKF
-      runEKFStep(bmsData.current, bmsData.avg_cell_v, dt);
-      publishComputedData(dt);
-
-      // Proteksi Pemutusan Otomatis (Hanya Relay 2, 3, dan 4)
-      if (ekf_x[0] < 0.20)
-      {
-        if (relayState[1] || relayState[2] || relayState[3])
-        {
-          Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF LOAD 2, 3, AND 4!");
-          setRelay(1, false); // Matikan Relay 2
-          setRelay(2, false); // Matikan Relay 3
-          setRelay(3, false); // Matikan Relay 4
-        }
-      }
+      // Beri sinyal ke TaskNetwork agar menjalankan EKF
+      // setelah proses penerimaan (buffer read) MQTT benar-benar tuntas.
+      flag_run_ekf = true;
     }
   }
 }
@@ -420,6 +399,7 @@ void reconnectMQTT()
   String clientId = "espbms-" + String(random(0xffff), HEX);
   if (mqtt.connect(clientId.c_str()))
   {
+    Serial.println("\n[MQTT] Terhubung ke Broker!");
     for (int i = 1; i <= 4; i++)
     {
       mqtt.subscribe((String(mqtt_prefix) + "/switch/relay_" + String(i) + "/command").c_str());
@@ -427,7 +407,12 @@ void reconnectMQTT()
     // --- Subscribe ke topik ganti halaman OLED ---
     mqtt.subscribe((String(mqtt_prefix) + "/display/page/command").c_str());
     mqtt.subscribe((String(mqtt_prefix) + "/data/main").c_str());
-    publishRelayState();
+    flag_publish_relay = true;
+  }
+  else
+  {
+    Serial.print("[MQTT] Gagal konek, rc=");
+    Serial.println(mqtt.state());
   }
 }
 
@@ -447,29 +432,19 @@ void TaskNetwork(void *pvParameters)
   ArduinoOTA.setHostname("esp-bms-ekf");
 
   ArduinoOTA.onStart([]()
-                     {
-                       ota_updating = true;      // Aktifkan lock screen
-                       ota_progress_percent = 0; // Reset nilai persen
-                     });
-
+                     { ota_updating = true; ota_progress_percent = 0; });
   ArduinoOTA.onEnd([]()
-                   {
-    // Memberikan waktu agar layar OTA (100%) sempat tergambar sebelum restart
-    delay(500); });
-
+                   { delay(500); });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                        {
-    // HANYA menghitung data matematis, JANGAN melakukan I2C (display) di sini!
-    // Supaya Task Jaringan di Core 0 tidak terblokir dan terhindar dari Timeout.
-    ota_progress_percent = (progress / (total / 100)); });
-
+                        { ota_progress_percent = (progress / (total / 100)); });
   ArduinoOTA.onError([](ota_error_t error)
-                     {
-    ota_updating = false; // Buka kunci layar jika gagal
-    Serial.printf("OTA Error[%u]", error); });
+                     { ota_updating = false; });
 
   ArduinoOTA.begin();
+
+  // Membesarkan Buffer dan Waktu Tunggu MQTT agar lebih kebal lag
   mqtt.setBufferSize(512);
+  mqtt.setKeepAlive(60);
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setCallback(mqttCallback);
 
@@ -512,7 +487,49 @@ void TaskNetwork(void *pvParameters)
         }
         else
         {
+          // mqtt.loop() bertugas menerima pesan masuk
           mqtt.loop();
+
+          // SETELAH pesan sukses diterima, BARU kita mengirim (Publish)
+          if (flag_run_ekf)
+          {
+            flag_run_ekf = false; // Reset flag
+
+            unsigned long now = millis();
+            float dt = 1.0;
+            if (!is_first_run && last_mqtt_time > 0)
+            {
+              // Anda bisa pakai dt asli di sini jika ingin waktu yg akurat
+              // dt = (now - last_mqtt_time) / 1000.0;
+            }
+            is_first_run = false;
+            last_mqtt_time = now;
+            dt_last = dt;
+
+            // Jalankan EKF
+            runEKFStep(bmsData.current, bmsData.avg_cell_v, dt);
+
+            // Kirim ke Logger Python
+            publishComputedData(dt);
+
+            // Proteksi Pemutusan Otomatis
+            if (ekf_x[0] < 0.20)
+            {
+              if (relayState[1] || relayState[2] || relayState[3])
+              {
+                Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF LOAD 2, 3, AND 4!");
+                setRelay(1, false);
+                setRelay(2, false);
+                setRelay(3, false);
+              }
+            }
+          }
+
+          if (flag_publish_relay)
+          {
+            flag_publish_relay = false;
+            publishRelayState();
+          }
         }
       }
     }
@@ -541,16 +558,12 @@ void drawOTAScreen(int percent)
   display.setCursor(0, 0);
   display.print("==== OTA UPDATE ====");
   display.drawLine(0, 10, 128, 10, WHITE);
-
   display.setCursor(0, 20);
   display.printf("Downloading: %d %%", percent);
-
   display.drawRect(14, 37, 100, 10, WHITE);
   display.fillRect(14, 37, percent, 10, WHITE);
-
   display.setCursor(0, 56);
   display.print("Please wait...");
-
   display.display();
 }
 
@@ -565,7 +578,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("==== SETUP MODE ====");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.print("WiFi: esp-setup");
     display.setCursor(0, 26);
@@ -584,7 +596,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("=== MAIN DASHBOARD ===");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf("Volt : %.1fV | %.1fA", bmsData.voltage, bmsData.current);
     display.setCursor(0, 26);
@@ -594,9 +605,7 @@ void updateLayar()
     display.setCursor(0, 46);
     display.printf(" Relay3:%-2s| Relay4:%s", relayState[2] ? "ON" : "X", relayState[3] ? "ON" : "X");
     display.setCursor(0, 56);
-    char wifiSym = (WiFi.status() == WL_CONNECTED) ? 'V' : 'X';
-    char mqttSym = mqtt.connected() ? 'V' : 'X';
-    display.printf(" WiFi [%c] | MQTT [%c]", wifiSym, mqttSym);
+    display.printf(" WiFi [%c] | MQTT [%c]", (WiFi.status() == WL_CONNECTED) ? 'V' : 'X', mqtt.connected() ? 'V' : 'X');
   }
   else if (currentPage == 2)
   {
@@ -604,7 +613,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("== CELL DIAGNOSTIC ==");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf("Avg Cell : %.3f V", bmsData.avg_cell_v);
     display.setCursor(0, 26);
@@ -622,7 +630,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("==== ENV & POWER ====");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf("Power  : %.0f W", bmsData.power);
     display.setCursor(0, 26);
@@ -638,7 +645,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("=== NETWORK & SYS ===");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf("WiFi : %s", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
     display.setCursor(0, 26);
@@ -655,7 +661,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("=== CELL VOLTAGES ===");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf(" V1:%.3f   V2:%.3f", bmsData.cells_v[0], bmsData.cells_v[1]);
     display.setCursor(0, 26);
@@ -671,7 +676,6 @@ void updateLayar()
     display.setCursor(0, 0);
     display.print("=== WIRE RESISTOR ===");
     display.drawLine(0, 10, 128, 10, WHITE);
-
     display.setCursor(0, 16);
     display.printf(" R1:%.3f   R2:%.3f", bmsData.wire_res[0], bmsData.wire_res[1]);
     display.setCursor(0, 26);
