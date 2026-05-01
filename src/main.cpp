@@ -469,7 +469,7 @@ void TaskNetwork(void *pvParameters)
     Serial.printf("OTA Error[%u]", error); });
 
   ArduinoOTA.begin();
-
+  mqtt.setBufferSize(512);
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setCallback(mqttCallback);
 
