@@ -68,11 +68,11 @@ const float lut_c1[LUT_ECM_SIZE] = {
     19607.70, 15177.97, 16580.74, 24189.08};
 
 // =========================================================
-// 4. TUNING NOISE PARAMETER
+// 4. TUNING NOISE PARAMETER (DISESUAIKAN DENGAN CSV MODEL EKF)
 // =========================================================
-const float Q_NOISE_00 = 1e-5;
-const float Q_NOISE_11 = 1e-4;
-const float R_NOISE = 1e-4;
+const float Q_NOISE_00 = 1e-6; // Diperbarui sesuai Model_Baterai_EKF.csv
+const float Q_NOISE_11 = 1e-4; // Sesuai CSV
+const float R_NOISE = 2e-4;    // Diperbarui sesuai Model_Baterai_EKF.csv (0.0002)
 
 // =========================================================
 // 5. VARIABEL GLOBAL IPC, STATE ESTIMATION, & UI
@@ -93,7 +93,7 @@ struct BMS_Data
   float power = 0.0;
   float mos_temp = 0.0;
   float bat_temp1 = 0.0;
-  float bat_temp2 = 0.0; // Tambahan variabel bat_temp2
+  float bat_temp2 = 0.0;
   float cells_v[8] = {0};
   float wire_res[8] = {0};
   float avg_cell_v = 0.0;
@@ -287,13 +287,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     msg += (char)payload[i];
   String topicStr = String(topic);
 
+  // --- KONTROL RELAY & PROTEKSI ---
   for (int i = 0; i < 4; i++)
   {
     String cmdTopic = String(mqtt_prefix) + "/switch/relay_" + String(i + 1) + "/command";
     if (topicStr == cmdTopic)
     {
-      // Perubahan: i > 0 berarti ini akan memproteksi (menolak) ON untuk Relay 2, 3, dan 4 (index 1, 2, 3)
-      // Jika SOC di bawah 20%. Relay 1 (index 0) dikecualikan dan boleh dihidupkan.
+      // Proteksi SOC < 20% HANYA UNTUK RELAY 2, 3, dan 4 (indeks 1, 2, 3)
       if (msg == "ON" && i > 0 && ekf_x[0] < 0.20)
       {
         Serial.println("[PROTECTION] Denied! Battery SOC below 20%. Only Relay 1 is allowed.");
@@ -304,7 +304,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
   }
 
-  // --- Ganti Halaman OLED via MQTT ---
+  // --- GANTI HALAMAN OLED VIA MQTT ---
   String pageCmdTopic = String(mqtt_prefix) + "/display/page/command";
   if (topicStr == pageCmdTopic)
   {
@@ -315,7 +315,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         currentPage++;
         if (currentPage > MAX_PAGES)
           currentPage = 1;
-        Serial.printf("\n[MQTT] Move Page-> %d\n", currentPage);
+        Serial.printf("\n[MQTT] Move Page -> %d\n", currentPage);
       }
       else
       {
@@ -335,8 +335,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
     return;
   }
-  // -----------------------------------------------
 
+  // --- MENERIMA DATA SENSOR DARI BMS JIKONG ---
   if (topicStr == String(mqtt_prefix) + "/data/main")
   {
     JsonDocument doc;
@@ -346,7 +346,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       bmsData.voltage = doc["voltage"] | 0.0;
       bmsData.bat_temp1 = doc["bat_temp1"] | 0.0;
-      bmsData.bat_temp2 = doc["bat_temp2"] | 0.0; // Parsing nilai bat_temp2
+      bmsData.bat_temp2 = doc["bat_temp2"] | 0.0;
       bmsData.mos_temp = doc["mos_temp"] | 0.0;
       bmsData.power = doc["power"] | 0.0;
       bmsData.current = doc["current"] | 0.0;
@@ -390,13 +390,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
       last_mqtt_time = now;
       dt_last = dt;
 
+      // Jalankan Engine EKF
       runEKFStep(bmsData.current, bmsData.avg_cell_v, dt);
       publishComputedData(dt);
 
+      // Proteksi Pemutusan Otomatis (Hanya Relay 2, 3, dan 4)
       if (ekf_x[0] < 0.20)
       {
-        // Perubahan: Mengecek dan mematikan HANYA Relay 2, 3, dan 4 (indeks 1, 2, 3)
-        // Relay 1 (indeks 0) dibiarkan menyala jika sedang menyala.
         if (relayState[1] || relayState[2] || relayState[3])
         {
           Serial.println("\n⚠️ [WARNING] SOC < 20%! AUTOMATICALLY CUT OFF LOAD 2, 3, AND 4!");
@@ -528,7 +528,7 @@ void bacaSensorAHT()
   }
 }
 
-// FUNGSI BARU: Menggambar Layar saat proses OTA berlangsung
+// Menggambar Layar saat proses OTA berlangsung
 void drawOTAScreen(int percent)
 {
   display.clearDisplay();
@@ -541,7 +541,7 @@ void drawOTAScreen(int percent)
 
   display.drawRect(14, 37, 100, 10, WHITE);
   display.fillRect(14, 37, percent, 10, WHITE);
-  // jangan matikan
+
   display.setCursor(0, 56);
   display.print("Please wait...");
 
@@ -601,15 +601,10 @@ void updateLayar()
 
     display.setCursor(0, 16);
     display.printf("Avg Cell : %.3f V", bmsData.avg_cell_v);
-
-    // Gabung Max dan Min agar hemat tempat
     display.setCursor(0, 26);
     display.printf("Max:%.3f Min:%.3f", bmsData.max_cell_v, bmsData.min_cell_v);
-
     display.setCursor(0, 36);
     display.printf("Delta(dV): %.3f V", bmsData.delta_v);
-
-    // Pisahkan Suhu MOS dan Baterai (T1 & T2)
     display.setCursor(0, 46);
     display.printf("Temp MOS : %.1f C", bmsData.mos_temp);
     display.setCursor(0, 56);
@@ -712,8 +707,6 @@ void printOledToSerial()
   {
     Serial.println("== CELL DIAGNOSTIC ==");
     Serial.printf("Avg Cell : %.3f V\n", bmsData.avg_cell_v);
-
-    // Penyesuaian Serial monitor agar selaras dengan OLED
     Serial.printf("Max:%.3f Min:%.3f\n", bmsData.max_cell_v, bmsData.min_cell_v);
     Serial.printf("Delta(dV): %.3f V\n", bmsData.delta_v);
     Serial.printf("Temp MOS : %.1f C\n", bmsData.mos_temp);
