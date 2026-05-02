@@ -139,8 +139,8 @@ struct BMS_Data
 // 0.0000 -> Skenario 1 (Charging) jika ingin CC & EKF mulai benar dari 0%
 // 1.0000 -> Skenario 2 (Discharge) jika mulai dari baterai penuh 100%
 // 0.9414 -> Skenario 3 Atau Tes Uji Konvergensi (Salah tebak awal)(Urban Load)
-float soc_cc = 0;
-float ekf_x[2] = {0, 0.0};
+float soc_cc = 0.9414;
+float ekf_x[2] = {0.9414, 0.0};
 //--------------------------------------------------
 float ekf_P[2][2] = {{0.01, 0.0}, {0.0, 0.01}};
 float v_pred_last = 0.0;
@@ -259,6 +259,20 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_NOISE);
 
   // ==============================================================
+  // KALKULASI UTILISASI MEMORI DAN CPU
+  // ==============================================================
+  uint32_t ram_total = ESP.getHeapSize();
+  uint32_t ram_used = ram_total - ESP.getFreeHeap();
+  float ram_pct = (ram_used / (float)ram_total) * 100.0;
+
+  uint32_t flash_used = ESP.getSketchSize();
+  uint32_t flash_total = flash_used + ESP.getFreeSketchSpace();
+  float flash_pct = (flash_used / (float)flash_total) * 100.0;
+
+  // Beban prosesor dihitung dari eksekusi EKF sebelumnya dibagi cycle time (1 detik = 1000 ms)
+  float cpu_load = (perf_ekf_time_ms / 1000.0) * 100.0;
+
+  // ==============================================================
   // CETAK KALKULASI EKF KE SERIAL MONITOR UNTUK DEMONSTRASI
   // ==============================================================
   Serial.println("\n┌──────────────────────────────────────────────┐");
@@ -270,6 +284,12 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   Serial.printf("│ 4. Error (Inov) : V_meas - V_pred = %+.4f V\n", error);
   Serial.printf("│ 5. Kalman Gain  : K[0] = %.5f | K[1] = %.5f\n", K[0], K[1]);
   Serial.printf("│ 6. Output Final : SOC_EKF Terkoreksi = %.2f %%\n", ekf_x[0] * 100);
+  Serial.println("├──────────────────────────────────────────────┤");
+  Serial.println("│   [ UTILISASI MEMORI & BEBAN PROSESOR ]      │");
+  Serial.printf("│ - Waktu EKF (Loop sblmnya): %.3f ms\n", perf_ekf_time_ms);
+  Serial.printf("│ - Beban CPU (Load)        : %.4f %%\n", cpu_load);
+  Serial.printf("│ - SRAM (Heap) Used        : %.2f %% (%u B)\n", ram_pct, ram_used);
+  Serial.printf("│ - Flash Memory Used       : %.2f %% (%u B)\n", flash_pct, flash_used);
   Serial.println("└──────────────────────────────────────────────┘");
 }
 
@@ -355,7 +375,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       if (msg == "NEXT")
       {
-        currentPage++;
+        currentPage = currentPage + 1;
         if (currentPage > MAX_PAGES)
           currentPage = 1;
         Serial.printf("\n[MQTT] Move Page -> %d\n", currentPage);
@@ -369,8 +389,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
           Serial.printf("\n[MQTT] Jump to Page -> %d\n", currentPage);
         }
       }
-      // Kita tidak perlu memanggil updateLayar() di sini agar tidak tabrakan (Crash) I2C di Core 0.
-      // Layar akan otomatis di-refresh oleh fungsi loop() di Core 1 dalam waktu maksimal 0.5 detik.
     }
     else
     {
@@ -463,18 +481,20 @@ void TaskNetwork(void *pvParameters)
   // --- KONFIGURASI FIREBASE ---
   config.api_key = API_KEY;
   config.database_url = FIREBASE_URL;
-  if (Firebase.signUp(&config, &auth, "", ""))
-  {
-    Serial.println("[FIREBASE] Otentikasi Anonim Berhasil");
-    signupOK = true;
-  }
-  else
-  {
-    Serial.printf("[FIREBASE] Gagal Daftar: %s\n", config.signer.signupError.message.c_str());
-  }
-  config.token_status_callback = tokenStatusCallback;
+
+  // ====================================================================================
+  // SOLUSI ERROR CONFIGURATION_NOT_FOUND / INVALID_EMAIL
+  // Karena Rules Realtime Database di console Anda sudah di-set ke TRUE (Publik),
+  // kita menginstruksikan library untuk melakukan Bypass/Test Mode agar tidak
+  // perlu melakukan pendaftaran Email/Anonymous authentication yang membuat error.
+  // ====================================================================================
+  config.signer.test_mode = true;
+
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+
+  signupOK = true; // Langsung di-flag true karena test mode aktif
+  Serial.println("[FIREBASE] Mode Publik (Test Mode) Aktif. Mengabaikan Otentikasi.");
 
   // --- KONFIGURASI ARDUINO OTA ---
   ArduinoOTA.setHostname("esp-bms-ekf");
@@ -626,9 +646,14 @@ void TaskNetwork(void *pvParameters)
             json.set("room_hum", room_hum);
 
             // Menulis ke path /bms_realtime (Akan me-replace data lama, cocok untuk Dashboard)
-            Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
-
-            Serial.println("[FIREBASE] Data berhasil dikirim (Interval 60s / Darurat)!");
+            if (Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json))
+            {
+              Serial.println("[FIREBASE] Data berhasil dikirim (Interval 60s / Darurat)!");
+            }
+            else
+            {
+              Serial.printf("[FIREBASE] Gagal kirim: %s\n", fbdo.errorReason().c_str());
+            }
           }
         }
       }
@@ -785,7 +810,7 @@ void updateLayar()
     display.setCursor(0, 46);
     display.printf(" R7:%.3f   R8:%.3f", bmsData.wire_res[6], bmsData.wire_res[7]);
   }
-  // --- HALAMAN BARU (HALAMAN 7) UNTUK FORMULASI MASALAH ---
+  // HALAMAN 7: FORMULASI MASALAH
   else if (currentPage == 7)
   {
     display.setCursor(0, 0);
@@ -917,7 +942,7 @@ void cekTombolSmart()
         // Kunci navigasi halaman jika portal aktif ATAU OTA berjalan
         if (!portalActive && !ota_updating)
         {
-          currentPage++;
+          currentPage = currentPage + 1;
           if (currentPage > MAX_PAGES)
             currentPage = 1;
           Serial.printf("\n[BUTTON] Short Press -> Change Page %d\n", currentPage);
