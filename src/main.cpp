@@ -88,11 +88,14 @@ const float lut_c1[LUT_ECM_SIZE] = {
     19607.70, 15177.97, 16580.74, 24189.08};
 
 // =========================================================
-// 4. TUNING NOISE PARAMETER
+// 4. TUNING NOISE PARAMETER (Diperbarui dari Python)
 // =========================================================
 const float Q_NOISE_00 = 1e-7; // Sangat percaya pada Coulomb Counting
-const float Q_NOISE_11 = 1e-5; // Toleransi untuk dinamika polarisasi ECM
-const float R_NOISE = 5e-2;    // Abaikan lonjakan tegangan di area flat LiFePO4
+const float Q_NOISE_11 = 5e-4; // Diupdate: Toleransi untuk dinamika polarisasi ECM
+
+// R adaptif yang dipertajam dari Python:
+const float R_NOISE_DISCHARGE = 0.005; // Ekstra tajam saat Discharge/Rest
+const float R_NOISE_CHARGE = 0.06;     // Ekstra skeptis pada sensor saat saturasi Charging
 
 // =========================================================
 // 5. VARIABEL GLOBAL IPC, STATE ESTIMATION, & UI
@@ -142,7 +145,8 @@ struct BMS_Data
 float soc_cc = 0.9414;
 float ekf_x[2] = {0.9414, 0.0};
 //--------------------------------------------------
-float ekf_P[2][2] = {{0.01, 0.0}, {0.0, 0.01}};
+// Diupdate dari Python: P_init diperbesar untuk recovery memori yang lebih cepat
+float ekf_P[2][2] = {{0.1, 0.0}, {0.0, 0.01}};
 float v_pred_last = 0.0;
 float dt_last = 0.0;
 
@@ -181,7 +185,9 @@ float get_dOCV_dSOC(float soc)
   float ocv_high = interpolate1D(s_high, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float ocv_low = interpolate1D(s_low, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float derivative = (ocv_high - ocv_low) / (s_high - s_low);
-  return max(derivative, 0.000001f);
+  // TRICK LiFePO4: Cegah Jacobian = 0 di area kurva yang datar
+  // Diupdate dari Python: minimal nilai 0.05
+  return max(derivative, 0.05f);
 }
 
 // =========================================================
@@ -216,6 +222,17 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   P_pred[1][0] = ekf_P[1][0] * alpha;
   P_pred[1][1] = (alpha * alpha * ekf_P[1][1]) + Q_NOISE_11;
 
+  // --- ADAPTIVE R NOISE (Sesuai Python) ---
+  float R_eff;
+  if (I_meas < 0.0f)
+  {
+    R_eff = R_NOISE_CHARGE; // Fase charging (arus negatif)
+  }
+  else
+  {
+    R_eff = R_NOISE_DISCHARGE; // Fase discharging / rest (arus positif/nol)
+  }
+
   // TAHAP UPDATE (A POSTERIORI)
   float OCV_pred = interpolate1D(soc_pred, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
@@ -229,7 +246,7 @@ void runEKFStep(float I_meas, float V_meas, float dt)
 
   // Inovasi & Kalman Gain (K)
   float S = (h0 * h0 * P_pred[0][0]) + (h0 * h1 * P_pred[0][1]) +
-            (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_NOISE;
+            (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_eff;
 
   float K[2];
   K[0] = ((P_pred[0][0] * h0) + (P_pred[0][1] * h1)) / S;
@@ -253,10 +270,10 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   Temp[1][0] = I_KH[1][0] * P_pred[0][0] + I_KH[1][1] * P_pred[1][0];
   Temp[1][1] = I_KH[1][0] * P_pred[0][1] + I_KH[1][1] * P_pred[1][1];
 
-  ekf_P[0][0] = Temp[0][0] * I_KH[0][0] + Temp[0][1] * I_KH[0][1] + (K[0] * K[0] * R_NOISE);
-  ekf_P[0][1] = Temp[0][0] * I_KH[1][0] + Temp[0][1] * I_KH[1][1] + (K[0] * K[1] * R_NOISE);
-  ekf_P[1][0] = Temp[1][0] * I_KH[0][0] + Temp[1][1] * I_KH[0][1] + (K[1] * K[0] * R_NOISE);
-  ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_NOISE);
+  ekf_P[0][0] = Temp[0][0] * I_KH[0][0] + Temp[0][1] * I_KH[0][1] + (K[0] * K[0] * R_eff);
+  ekf_P[0][1] = Temp[0][0] * I_KH[1][0] + Temp[0][1] * I_KH[1][1] + (K[0] * K[1] * R_eff);
+  ekf_P[1][0] = Temp[1][0] * I_KH[0][0] + Temp[1][1] * I_KH[0][1] + (K[1] * K[0] * R_eff);
+  ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_eff);
 
   // ==============================================================
   // KALKULASI UTILISASI MEMORI DAN CPU
