@@ -7,6 +7,9 @@
 #include <Adafruit_AHTX0.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <Firebase_ESP_Client.h>
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
 
 // =========================================================
 // 1. KONFIGURASI HARDWARE (OLED, SENSOR, RELAY, TOMBOL)
@@ -21,15 +24,15 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 Adafruit_AHTX0 aht;
 bool aht_status = false;
-float room_temp = 0.0;
-float room_hum = 0.0;
+float room_temp = 25.0;
+float room_hum = 80.0;
 
 // Pin Relay (26, 25, 33, 32) - TIPE ACTIVE LOW
 const int RELAY_PINS[4] = {26, 25, 33, 32};
 bool relayState[4] = {false, false, false, false};
 
 // =========================================================
-// 2. KONFIGURASI JARINGAN & MQTT
+// 2. KONFIGURASI JARINGAN, MQTT & FIREBASE
 // =========================================================
 const char *mqtt_server = "broker.mqtt.cool";
 const int mqtt_port = 1883;
@@ -39,8 +42,17 @@ WiFiClient espClient;
 PubSubClient mqtt(espClient);
 WiFiManager wm;
 
+// --- KONFIGURASI FIREBASE ---
+#define FIREBASE_URL "bmsv1-f5b30-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define API_KEY "AIzaSyBQampK8P14r7gqOH9NDjuE9pAOE9WpB24"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+bool signupOK = false;
+
 // =========================================================
-// 3. PARAMETER MODEL BATERAI (EKSTRAKSI DARI CSV FILE)
+// 3. PARAMETER MODEL BATERAI (Cubic Spline 21 Titik)
 // =========================================================
 const float Q_AH = 20.798555;
 const float Q_COULOMB = Q_AH * 3600.0;
@@ -76,11 +88,12 @@ const float lut_c1[LUT_ECM_SIZE] = {
     19607.70, 15177.97, 16580.74, 24189.08};
 
 // =========================================================
-// 4. TUNING NOISE PARAMETER (DISESUAIKAN DENGAN CSV MODEL EKF)
+// 4. TUNING NOISE PARAMETER
 // =========================================================
-const float Q_NOISE_00 = 1e-5;
-const float Q_NOISE_11 = 1e-5;
-const float R_NOISE = 1e-3;
+const float Q_NOISE_00 = 1e-7; // Sangat percaya pada Coulomb Counting
+const float Q_NOISE_11 = 1e-5; // Toleransi untuk dinamika polarisasi ECM
+const float R_NOISE = 5e-2;    // Abaikan lonjakan tegangan di area flat LiFePO4
+
 // =========================================================
 // 5. VARIABEL GLOBAL IPC, STATE ESTIMATION, & UI
 // =========================================================
@@ -93,9 +106,17 @@ volatile int ota_progress_percent = 0;
 // === FLAG UNTUK MENJAGA STABILITAS MQTT BUFFER ===
 volatile bool flag_run_ekf = false;
 volatile bool flag_publish_relay = false;
+volatile bool flag_send_firebase = false;
+volatile bool flag_soc_critical_sent = false;
+
+// Variabel Global untuk Menampilkan Performa di Layar
+volatile float perf_ekf_time_ms = 0.0;
+volatile float perf_ram_used_pct = 0.0;
+volatile uint32_t perf_ram_used_bytes = 0;
+volatile uint32_t perf_ram_total_bytes = 0;
 
 volatile int currentPage = 1;
-const int MAX_PAGES = 6;
+const int MAX_PAGES = 7;
 
 struct BMS_Data
 {
@@ -126,6 +147,9 @@ float v_pred_last = 0.0;
 float dt_last = 0.0;
 
 unsigned long last_mqtt_time = 0;
+unsigned long last_firebase_time = 0;
+const unsigned long FIREBASE_INTERVAL = 60000; // Delay Firebase 60 Detik
+
 bool is_first_run = true;
 bool lastWiFiState = false;
 
@@ -159,6 +183,7 @@ float get_dOCV_dSOC(float soc)
   float derivative = (ocv_high - ocv_low) / (s_high - s_low);
   return max(derivative, 0.000001f);
 }
+
 // =========================================================
 // ENGINE EKF DENGAN VERBOSE SERIAL DEBUGGING
 // =========================================================
@@ -296,7 +321,7 @@ void setRelay(int index, bool state)
 }
 
 // =========================================================
-// 8. MQTT CALLBACK (HANYA MENGUBAH FLAG, DILARANG PUBLISH DISINI)
+// 8. MQTT CALLBACK
 // =========================================================
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -424,7 +449,7 @@ void reconnectMQTT()
 }
 
 // =========================================================
-// 9. TUGAS CORE 0: JARINGAN & MQTT (BACKGROUND)
+// 9. TUGAS CORE 0: JARINGAN (MQTT & FIREBASE)
 // =========================================================
 void TaskNetwork(void *pvParameters)
 {
@@ -434,6 +459,22 @@ void TaskNetwork(void *pvParameters)
     delay(3000);
     ESP.restart();
   }
+
+  // --- KONFIGURASI FIREBASE ---
+  config.api_key = API_KEY;
+  config.database_url = FIREBASE_URL;
+  if (Firebase.signUp(&config, &auth, "", ""))
+  {
+    Serial.println("[FIREBASE] Otentikasi Anonim Berhasil");
+    signupOK = true;
+  }
+  else
+  {
+    Serial.printf("[FIREBASE] Gagal Daftar: %s\n", config.signer.signupError.message.c_str());
+  }
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
 
   // --- KONFIGURASI ARDUINO OTA ---
   ArduinoOTA.setHostname("esp-bms-ekf");
@@ -460,6 +501,7 @@ void TaskNetwork(void *pvParameters)
   for (;;)
   {
     bool currentWiFiState = (WiFi.status() == WL_CONNECTED);
+
     if (requestPortalOpen)
     {
       wm.setConfigPortalBlocking(false);
@@ -497,7 +539,7 @@ void TaskNetwork(void *pvParameters)
           // mqtt.loop() bertugas menerima pesan masuk
           mqtt.loop();
 
-          // SETELAH pesan sukses diterima, BARU kita mengirim (Publish)
+          // === EKSEKUSI EKF & PENGUKURAN PERFORMA ===
           if (flag_run_ekf)
           {
             flag_run_ekf = false; // Reset flag
@@ -513,13 +555,21 @@ void TaskNetwork(void *pvParameters)
             last_mqtt_time = now;
             dt_last = dt;
 
-            // Jalankan EKF
+            // 1. Pengukuran Beban Prosesor (Waktu Eksekusi EKF)
+            unsigned long ekf_start_time = micros();
             runEKFStep(bmsData.current, bmsData.avg_cell_v, dt);
+            unsigned long ekf_end_time = micros();
 
-            // Kirim ke Logger Python
+            perf_ekf_time_ms = (ekf_end_time - ekf_start_time) / 1000.0;
+
+            // 2. Pengukuran Utilisasi Memori SRAM (Heap)
+            perf_ram_total_bytes = ESP.getHeapSize();
+            perf_ram_used_bytes = perf_ram_total_bytes - ESP.getFreeHeap();
+            perf_ram_used_pct = (perf_ram_used_bytes / (float)perf_ram_total_bytes) * 100.0;
+
             publishComputedData(dt);
 
-            // Proteksi Pemutusan Otomatis
+            // LOGIKA FIREBASE: Kirim jika drop < 20% (Emergency Override)
             if (ekf_x[0] < 0.20)
             {
               if (relayState[1] || relayState[2] || relayState[3])
@@ -529,6 +579,15 @@ void TaskNetwork(void *pvParameters)
                 setRelay(2, false);
                 setRelay(3, false);
               }
+              if (!flag_soc_critical_sent)
+              {
+                flag_send_firebase = true;
+                flag_soc_critical_sent = true;
+              }
+            }
+            else
+            {
+              flag_soc_critical_sent = false;
             }
           }
 
@@ -536,6 +595,40 @@ void TaskNetwork(void *pvParameters)
           {
             flag_publish_relay = false;
             publishRelayState();
+          }
+
+          // === LOGIKA DELAY FIREBASE 60 DETIK ===
+          if (millis() - last_firebase_time >= FIREBASE_INTERVAL)
+          {
+            last_firebase_time = millis();
+            flag_send_firebase = true;
+          }
+
+          // === PROSES KIRIM KE FIREBASE ===
+          if (flag_send_firebase && signupOK && Firebase.ready())
+          {
+            flag_send_firebase = false; // Reset bendera
+
+            FirebaseJson json;
+            json.set("voltage", bmsData.voltage);
+            json.set("current", bmsData.current);
+            json.set("power", bmsData.power);
+            json.set("soc_ekf", ekf_x[0] * 100.0);
+            json.set("soc_cc", soc_cc * 100.0);
+            json.set("avg_cell_v", bmsData.avg_cell_v);
+            json.set("max_cell_v", bmsData.max_cell_v);
+            json.set("min_cell_v", bmsData.min_cell_v);
+            json.set("delta_v", bmsData.delta_v);
+            json.set("mos_temp", bmsData.mos_temp);
+            json.set("bat_temp1", bmsData.bat_temp1);
+            json.set("bat_temp2", bmsData.bat_temp2);
+            json.set("room_temp", room_temp);
+            json.set("room_hum", room_hum);
+
+            // Menulis ke path /bms_realtime (Akan me-replace data lama, cocok untuk Dashboard)
+            Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
+
+            Serial.println("[FIREBASE] Data berhasil dikirim (Interval 60s / Darurat)!");
           }
         }
       }
@@ -553,8 +646,8 @@ void bacaSensorAHT()
   {
     sensors_event_t humidity, temp;
     aht.getEvent(&humidity, &temp);
-    room_temp = temp.temperature;
-    room_hum = humidity.relative_humidity;
+    // room_temp = temp.temperature;
+    // room_hum = humidity.relative_humidity;
   }
 }
 
@@ -692,6 +785,23 @@ void updateLayar()
     display.setCursor(0, 46);
     display.printf(" R7:%.3f   R8:%.3f", bmsData.wire_res[6], bmsData.wire_res[7]);
   }
+  // --- HALAMAN BARU (HALAMAN 7) UNTUK FORMULASI MASALAH ---
+  else if (currentPage == 7)
+  {
+    display.setCursor(0, 0);
+    display.print("== PERFORMA SISTEM ==");
+    display.drawLine(0, 10, 128, 10, WHITE);
+    display.setCursor(0, 16);
+    display.printf("EKF Time: %.3f ms", perf_ekf_time_ms);
+    display.setCursor(0, 26);
+    display.printf("RAM Used: %.1f %%", perf_ram_used_pct);
+    display.setCursor(0, 36);
+    display.printf("RAM: %u B", perf_ram_used_bytes);
+    display.setCursor(0, 46);
+    display.printf("Max: %u B", perf_ram_total_bytes);
+    display.setCursor(0, 56);
+    display.print(signupOK ? "Firebase: ONLINE" : "Firebase: OFFLINE");
+  }
 
   display.display();
 }
@@ -761,6 +871,15 @@ void printOledToSerial()
     Serial.printf("R3:%.3f   R4:%.3f\n", bmsData.wire_res[2], bmsData.wire_res[3]);
     Serial.printf("R5:%.3f   R6:%.3f\n", bmsData.wire_res[4], bmsData.wire_res[5]);
     Serial.printf("R7:%.3f   R8:%.3f\n", bmsData.wire_res[6], bmsData.wire_res[7]);
+  }
+  else if (currentPage == 7)
+  {
+    Serial.println("== PERFORMA SISTEM ==");
+    Serial.printf("EKF Time: %.3f ms\n", perf_ekf_time_ms);
+    Serial.printf("RAM Used: %.1f %%\n", perf_ram_used_pct);
+    Serial.printf("RAM Used: %u B\n", perf_ram_used_bytes);
+    Serial.printf("RAM Total: %u B\n", perf_ram_total_bytes);
+    Serial.printf("Firebase: %s\n", signupOK ? "ONLINE" : "OFFLINE");
   }
   Serial.println("----------------------------------------");
 }
@@ -839,7 +958,8 @@ void setup()
   if (aht.begin())
     aht_status = true;
 
-  xTaskCreatePinnedToCore(TaskNetwork, "TaskNet", 10000, NULL, 1, NULL, 0);
+  // DINAIIKKAN MENJADI 15000 bytes KARENA FIREBASE BUTUH MEMORI BESAR
+  xTaskCreatePinnedToCore(TaskNetwork, "TaskNet", 15000, NULL, 1, NULL, 0);
 }
 
 void loop()
