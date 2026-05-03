@@ -93,9 +93,10 @@ const float lut_c1[LUT_ECM_SIZE] = {
 const float Q_NOISE_00 = 1e-7; // Sangat percaya pada Coulomb Counting
 const float Q_NOISE_11 = 5e-4; // Diupdate: Toleransi untuk dinamika polarisasi ECM
 
-// R adaptif yang dipertajam dari Python:
-const float R_NOISE_DISCHARGE = 0.005; // Ekstra tajam saat Discharge/Rest
-const float R_NOISE_CHARGE = 0.06;     // Ekstra skeptis pada sensor saat saturasi Charging
+// R adaptif tiga-state: REST paling tajam, DISCHARGE tajam, CHARGE skeptis saat CV
+const float R_NOISE_CHARGE = 0.035;
+const float R_NOISE_DISCHARGE = 0.004;
+const float R_NOISE_REST = 0.0008;
 
 // =========================================================
 // 5. VARIABEL GLOBAL IPC, STATE ESTIMATION, & UI
@@ -224,13 +225,17 @@ void runEKFStep(float I_meas, float V_meas, float dt)
 
   // --- ADAPTIVE R NOISE (Sesuai Python) ---
   float R_eff;
-  if (I_meas < 0.0f)
+  if (fabsf(I_meas) < 0.05f)
   {
-    R_eff = R_NOISE_CHARGE; // Fase charging (arus negatif)
+    R_eff = R_NOISE_REST; // Fase REST: tegangan = OCV murni, sangat dipercaya
+  }
+  else if (I_meas < 0.0f)
+  {
+    R_eff = R_NOISE_CHARGE; // Fase CHARGING: skeptis di area saturasi CV
   }
   else
   {
-    R_eff = R_NOISE_DISCHARGE; // Fase discharging / rest (arus positif/nol)
+    R_eff = R_NOISE_DISCHARGE; // Fase DISCHARGE: tajam, sensor handal
   }
 
   // TAHAP UPDATE (A POSTERIORI)
