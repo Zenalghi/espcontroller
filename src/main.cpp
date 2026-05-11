@@ -579,9 +579,10 @@ void reconnectMQTT()
 // =========================================================
 void TaskNetwork(void *pvParameters)
 {
-  wm.setConfigPortalTimeout(180);
-  if (!wm.autoConnect("Re", "12345679"))
+  wm.setConfigPortalTimeout(180); // Portal WiFi akan tertutup otomatis setelah 3 menit jika didiamkan
+  if (!wm.autoConnect("esp-setup", "12345679"))
   {
+    Serial.println("[WIFI] Gagal connect dan timeout hit, restart ESP32...");
     delay(3000);
     ESP.restart();
   }
