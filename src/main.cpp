@@ -54,7 +54,9 @@ bool signupOK = false;
 // =========================================================
 // 3. PARAMETER MODEL BATERAI (Cubic Spline 21 Titik)
 // =========================================================
+// Kapasitas Nominal Baterai dalam Ampere-Hour (Ah)
 const float Q_AH = 20.798555;
+// Kapasitas dikonversi menjadi Coulomb (Ampere-detik) -> 1 Ah = 3600 Coulomb
 const float Q_COULOMB = Q_AH * 3600.0;
 
 // Diperbarui menjadi 21 titik (interval 5%) dari Cubic Spline Ground Truth
@@ -88,7 +90,7 @@ const float lut_c1[LUT_ECM_SIZE] = {
     19607.70, 15177.97, 16580.74, 24189.08};
 
 // =========================================================
-// 4. TUNING NOISE PARAMETER (Diperbarui dari Python)
+// 4. TUNING NOISE PARAMETER
 // =========================================================
 const float Q_NOISE_00 = 1e-7; // Sangat percaya pada Coulomb Counting
 const float Q_NOISE_11 = 5e-4; // Diupdate: Toleransi untuk dinamika polarisasi ECM
@@ -138,16 +140,22 @@ struct BMS_Data
   float delta_v = 0.0;
 } bmsData;
 
-// --- SETTING INISIALISASI SOC AWAL ---
-// Ubah nilai ini sesuai tujuan pengujian skripsi Anda:
-// 0.0000 -> Skenario 1 (Charging) jika ingin CC & EKF mulai benar dari 0%
-// 1.0000 -> Skenario 2 (Discharge) jika mulai dari baterai penuh 100%
-// 0.9414 -> Skenario 3 Atau Tes Uji Konvergensi (Salah tebak awal)(Urban Load)
+// --- VARIABEL UNTUK COULOMB COUNTING (CC) ---
+// soc_cc: Nilai State of Charge MURNI dari hasil integrasi arus tanpa koreksi
 float soc_cc = 0.9414;
+
+// --- VARIABEL UNTUK EXTENDED KALMAN FILTER (EKF) ---
+// ekf_x[2] adalah "State Vector" atau tebakan saat ini tentang kondisi baterai:
+// ekf_x[0] = SoC (State of Charge), rentang 0.0 hingga 1.0
+// ekf_x[1] = V_c1 (Tegangan Polarisasi), yaitu tegangan yang tertahan di komponen kapasitor model baterai (RC)
 float ekf_x[2] = {0.9414, 0.0};
-//--------------------------------------------------
-// Diupdate dari Python: P_init diperbesar untuk recovery memori yang lebih cepat
+
+// ekf_P[2][2] adalah "Error Covariance Matrix":
+// Ini melambangkan seberapa RAGU algoritma terhadap tebakannya sendiri.
+// Diagonal utama [0][0] adalah keraguan terhadap SoC, [1][1] keraguan terhadap V_c1.
+// Awalnya di-set 0.1 (agak ragu), nanti matriks ini akan mengecil otomatis seiring berjalannya algoritma (konvergen).
 float ekf_P[2][2] = {{0.1, 0.0}, {0.0, 0.01}};
+
 float v_pred_last = 0.0;
 float dt_last = 0.0;
 
@@ -178,6 +186,8 @@ float interpolate1D(float x, const float *x_data, const float *y_data, int size)
   return y_data[0];
 }
 
+// Fungsi untuk mencari turunan OCV terhadap SoC (Jacobian dOCV/dSOC)
+// Berfungsi memberi tahu EKF seberapa miring kurva tegangan pada SoC saat ini
 float get_dOCV_dSOC(float soc)
 {
   float delta = 0.001;
@@ -186,8 +196,6 @@ float get_dOCV_dSOC(float soc)
   float ocv_high = interpolate1D(s_high, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float ocv_low = interpolate1D(s_low, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float derivative = (ocv_high - ocv_low) / (s_high - s_low);
-  // TRICK LiFePO4: Cegah Jacobian = 0 di area kurva yang datar
-  // Diupdate dari Python: minimal nilai 0.05
   return max(derivative, 0.05f);
 }
 
@@ -196,19 +204,28 @@ float get_dOCV_dSOC(float soc)
 // =========================================================
 void runEKFStep(float I_meas, float V_meas, float dt)
 {
-  // 1. Integrasi Coulomb Counting
+  // -------------------------------------------------------------
+  // METODE 1: COULOMB COUNTING (PENGUKURAN OPEN-LOOP)
+  // Menghitung akumulasi murni arus masuk/keluar. Tanpa ada koreksi.
+  // -------------------------------------------------------------
   soc_cc = constrain(soc_cc - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
 
+  // -------------------------------------------------------------
+  // METODE 2: EXTENDED KALMAN FILTER (PENGUKURAN CLOSED-LOOP)
+  // -------------------------------------------------------------
+
+  // Variabel lokal untuk menyimpan status EKF langkah sebelumnya
   float soc_prev = constrain(ekf_x[0], 0.0, 1.0);
   float vc1_prev = ekf_x[1];
 
-  // 2. Evaluasi Parameter Dinamis ECM
+  // Evaluasi Parameter Dinamis ECM (Mencari nilai R0, R1, C1 baterai saat ini berdasarkan tabel)
   float R0 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_r0, LUT_ECM_SIZE), 0.0001f);
   float R1 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_r1, LUT_ECM_SIZE), 0.0001f);
   float C1 = max(interpolate1D(soc_prev, lut_soc_ecm, lut_c1, LUT_ECM_SIZE), 1.0f);
-  float tau = max(R1 * C1, 0.000001f);
+  float tau = max(R1 * C1, 0.000001f); // Konstanta waktu sirkuit RC baterai
 
-  // TAHAP PREDIKSI (A PRIORI)
+  // === TAHAP 1: PREDIKSI (A PRIORI) ============================
+  // Memprediksi status (SoC dan Vc1) masa depan HANYA dengan melihat Arus (Coulomb Counting mode)
   float soc_pred = constrain(soc_prev - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
   float alpha = (dt > 0) ? exp(-dt / tau) : 1.0f;
   float vc1_pred = (alpha * vc1_prev) + (R1 * (1.0f - alpha) * I_meas);
@@ -216,53 +233,61 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   ekf_x[0] = soc_pred;
   ekf_x[1] = vc1_pred;
 
-  // Prediksi Matriks Kovariansi P_pred
+  // Memprediksi bertambahnya "Keraguan" matriks (P_pred) karena adanya noise sistem
   float P_pred[2][2];
   P_pred[0][0] = ekf_P[0][0] + Q_NOISE_00;
   P_pred[0][1] = ekf_P[0][1] * alpha;
   P_pred[1][0] = ekf_P[1][0] * alpha;
   P_pred[1][1] = (alpha * alpha * ekf_P[1][1]) + Q_NOISE_11;
 
-  // --- ADAPTIVE R NOISE (Sesuai Python) ---
+  // --- ADAPTIVE R NOISE (Tuning Kepercayaan terhadap Sensor Tegangan) ---
   float R_eff;
   if (fabsf(I_meas) < 0.05f)
   {
-    R_eff = R_NOISE_REST; // Fase REST: tegangan = OCV murni, sangat dipercaya
+    R_eff = R_NOISE_REST; // Fase REST: Arus kecil, tegangan murni, sangat percaya sensor (R kecil)
   }
   else if (I_meas < 0.0f)
   {
-    R_eff = R_NOISE_CHARGE; // Fase CHARGING: skeptis di area saturasi CV
+    R_eff = R_NOISE_CHARGE; // Fase CHARGING: Skeptis terhadap tegangan karena baterai kembung/CV saturasi
   }
   else
   {
-    R_eff = R_NOISE_DISCHARGE; // Fase DISCHARGE: tajam, sensor handal
+    R_eff = R_NOISE_DISCHARGE; // Fase DISCHARGE: Sensor lumayan handal untuk diikuti
   }
 
-  // TAHAP UPDATE (A POSTERIORI)
+  // === TAHAP 2: KOREKSI (A POSTERIORI) ==========================
+
+  // Mencari OCV Prediksi dari SoC Prediksi
   float OCV_pred = interpolate1D(soc_pred, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
   float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
 
+  // Menghitung V_pred (Tebakan tegangan terminal baterai) -> Rumus: V = OCV - Vc1 - (I * R0)
   float V_pred = OCV_pred - vc1_pred - (I_meas * R0);
   v_pred_last = V_pred;
 
-  // Matriks Jacobian (H)
+  // Matriks Jacobian (H): Menghubungkan turunan OCV dengan Model Pengukuran
   float h0 = dOCV_dSOC;
   float h1 = -1.0f;
 
-  // Inovasi & Kalman Gain (K)
+  // Covariance Inovasi (S): Kombinasi keraguan prediksi dengan noise sensor tegangan
   float S = (h0 * h0 * P_pred[0][0]) + (h0 * h1 * P_pred[0][1]) +
             (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_eff;
 
+  // Kalman Gain (K): Mengukur SEBERAPA BESAR sistem harus mengoreksi tebakannya
+  // Jika K besar -> Sangat percaya sensor (koreksi agresif)
+  // Jika K kecil -> Percaya pada model internal (koreksi pelan)
   float K[2];
   K[0] = ((P_pred[0][0] * h0) + (P_pred[0][1] * h1)) / S;
   K[1] = ((P_pred[1][0] * h0) + (P_pred[1][1] * h1)) / S;
 
-  // Koreksi State
+  // Inovasi (Error Tegangan): Selisih antara Tegangan Sensor Asli dikurangi Tebakan Sistem
   float error = V_meas - V_pred;
-  ekf_x[0] = constrain(ekf_x[0] + (K[0] * error), 0.0, 1.0);
+
+  // FINAL KOREKSI: Status ditebak + (Kalman Gain * Error)
+  ekf_x[0] = constrain(ekf_x[0] + (K[0] * error), 0.0, 1.0); // SoC telah dikoreksi cerdas oleh EKF!
   ekf_x[1] = ekf_x[1] + (K[1] * error);
 
-  // Joseph Form Update
+  // Joseph Form Update: Memperbarui tingkat keraguan (Matriks P) untuk siklus loop berikutnya
   float I_KH[2][2];
   I_KH[0][0] = 1.0f - (K[0] * h0);
   I_KH[0][1] = -(K[0] * h1);
@@ -693,8 +718,8 @@ void bacaSensorAHT()
   {
     sensors_event_t humidity, temp;
     aht.getEvent(&humidity, &temp);
-    // room_temp = temp.temperature;
-    // room_hum = humidity.relative_humidity;
+    room_temp = temp.temperature;
+    room_hum = humidity.relative_humidity;
   }
 }
 
