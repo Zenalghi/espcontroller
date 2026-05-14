@@ -34,7 +34,8 @@ bool relayState[4] = {false, false, false, false};
 // =========================================================
 // 2. KONFIGURASI JARINGAN, MQTT & FIREBASE
 // =========================================================
-const char *mqtt_server = "broker.mqtt.cool";
+// const char *mqtt_server = "broker.mqtt.cool";
+const char *mqtt_server = "broker.emqx.io";
 const int mqtt_port = 1883;
 const char *mqtt_prefix = "bms_panel/2602165";
 
@@ -550,7 +551,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 
 void reconnectMQTT()
 {
-  String clientId = "espbms-" + String(random(0xffff), HEX);
+  // Membuat Client ID yang super unik menggunakan kombinasi MAC Address ESP32
+  String clientId = "espbms-" + String((uint32_t)ESP.getEfuseMac(), HEX) + String(random(0xffff), HEX);
   if (mqtt.connect(clientId.c_str()))
   {
     Serial.println("\n[MQTT] Terhubung ke Broker!");
@@ -621,7 +623,7 @@ void TaskNetwork(void *pvParameters)
 
   // Membesarkan Buffer dan Waktu Tunggu MQTT agar lebih kebal lag
   mqtt.setBufferSize(512);
-  mqtt.setKeepAlive(60);
+  mqtt.setKeepAlive(120);
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setCallback(mqttCallback);
 
