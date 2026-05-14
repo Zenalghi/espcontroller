@@ -10,6 +10,7 @@
 #include <Firebase_ESP_Client.h>
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
+#include <time.h>
 
 // =========================================================
 // 1. KONFIGURASI HARDWARE (OLED, SENSOR, RELAY, TOMBOL)
@@ -55,7 +56,7 @@ bool signupOK = false;
 // =========================================================
 // 3. PARAMETER MODEL BATERAI (Cubic Spline 21 Titik)
 // =========================================================
-// Q_AH: Kapasitas Nominal Baterai dalam Ampere-Hour (Ah) sesuai datasheet/hasil tes
+// Q_AH: Kapasitas Nominal Baterai dalam Ampere-Hour (Ah)
 const float Q_AH = 20.798555;
 // Q_COULOMB: Kapasitas dikonversi menjadi Coulomb (Ampere-detik).
 // Digunakan dalam rumus SoC karena 'dt' (delta time) bersatuan detik (1 Ah = 3600 Coulomb).
@@ -100,15 +101,15 @@ const float lut_c1[LUT_ECM_SIZE] = {
 // =========================================================
 // 4. TUNING NOISE PARAMETER (Matriks Q dan R)
 // =========================================================
-// Matriks Q (Process Noise Covariance): Menunjukkan seberapa "Tidak Percaya" sistem pada model tebakannya sendiri.
-// Q_NOISE_00: Noise proses untuk tebakan SoC. Nilai 1e-7 sangat kecil, artinya kita SANGAT percaya pada hitungan Arus (Coulomb Counting).
+// Matriks Q (Process Noise Covariance): Seberapa "Tidak Percaya" sistem pada model tebakannya sendiri.
+// Q_NOISE_00: Noise proses untuk tebakan SoC. Sangat kecil = SANGAT percaya pada hitungan Arus (Coulomb Counting).
 const float Q_NOISE_00 = 1e-7;
-// Q_NOISE_11: Noise proses untuk tegangan kapasitor (Vc1). Memberikan sedikit toleransi kelenturan pada dinamika model.
+// Q_NOISE_11: Noise proses untuk tegangan kapasitor (Vc1). Toleransi kelenturan pada dinamika model.
 const float Q_NOISE_11 = 5e-4;
 
-// Matriks R (Measurement Noise Covariance): Menunjukkan seberapa "Tidak Percaya" sistem pada sensor Tegangan.
-// Semakin besar nilai R, EKF akan semakin mengabaikan tegangan saat mengoreksi SoC (Mencegah lonjakan koreksi berlebih).
-// R_NOISE_CHARGE: Nilai besar (skeptis) karena saat di-charge tegangan sering palsu akibat resistansi.
+// Matriks R (Measurement Noise Covariance): Seberapa "Tidak Percaya" sistem pada sensor Tegangan.
+// Adaptif 3-State: EKF akan berubah-ubah sifatnya tergantung baterai sedang apa.
+// R_NOISE_CHARGE: Skeptis/Tidak terlalu percaya sensor karena saat di-charge tegangan sering semu/palsu.
 const float R_NOISE_CHARGE = 0.035;
 // R_NOISE_DISCHARGE: Nilai sedang, sensor tegangan cukup bisa diandalkan saat pengosongan.
 const float R_NOISE_DISCHARGE = 0.004;
@@ -183,7 +184,9 @@ const unsigned long FIREBASE_INTERVAL = 60000;
 
 bool is_first_run = true;
 bool lastWiFiState = false;
-bool is_soc_initialized = false; // FLAG BARU: Mencegah EKF berjalan sebelum dapat SOC dari Jikong
+
+// FLAG AUTO-CALIBRATION: Mencegah EKF dan CC berjalan sebelum mendapat SoC asli dari Jikong
+bool is_soc_initialized = false;
 
 // =========================================================
 // 6. FUNGSI MATEMATIKA: INTERPOLASI & EKF
@@ -502,7 +505,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     return;
   }
 
-  // --- TERIMA DATA HiL ZKETECH / SENSOR ARUS TEGANGAN NYATA ---
+  // --- TERIMA DATA TEGANGAN & ARUS NYATA ---
   if (topicStr == String(mqtt_prefix) + "/data/main")
   {
     JsonDocument doc;
@@ -553,6 +556,7 @@ void reconnectMQTT()
 {
   // Membuat Client ID yang super unik menggunakan kombinasi MAC Address ESP32
   String clientId = "espbms-" + String((uint32_t)ESP.getEfuseMac(), HEX) + String(random(0xffff), HEX);
+
   if (mqtt.connect(clientId.c_str()))
   {
     Serial.println("\n[MQTT] Terhubung ke Broker!");
@@ -589,6 +593,16 @@ void TaskNetwork(void *pvParameters)
     ESP.restart();
   }
 
+  // --- SINKRONISASI WAKTU INTERNET (NTP) UNTUK TIMESTAMP FIREBASE ---
+  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov"); // Waktu Indonesia Barat (UTC+7)
+  Serial.println("[NTP] Sinkronisasi waktu internet...");
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo, 5000))
+  {
+    Serial.println("[NTP] Menunggu waktu sinkron...");
+  }
+  Serial.println("[NTP] Waktu berhasil disinkronisasi!");
+
   // --- KONFIGURASI FIREBASE ---
   config.api_key = API_KEY;
   config.database_url = FIREBASE_URL;
@@ -599,7 +613,7 @@ void TaskNetwork(void *pvParameters)
   // kita menginstruksikan library untuk melakukan Bypass/Test Mode agar tidak
   // perlu melakukan pendaftaran Email/Anonymous authentication yang membuat error.
   // ====================================================================================
-  config.signer.test_mode = true;
+  config.signer.test_mode = true; // Melewati enkripsi otentikasi login email
 
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
@@ -621,7 +635,7 @@ void TaskNetwork(void *pvParameters)
 
   ArduinoOTA.begin();
 
-  // Membesarkan Buffer dan Waktu Tunggu MQTT agar lebih kebal lag
+  // Membesarkan Buffer dan Waktu Tunggu MQTT agar kebal lag (120 Detik)
   mqtt.setBufferSize(512);
   mqtt.setKeepAlive(120);
   mqtt.setServer(mqtt_server, mqtt_port);
@@ -684,6 +698,9 @@ void TaskNetwork(void *pvParameters)
 
             unsigned long now = millis();
             float dt = 1.0;
+
+            // --- KALKULASI DELTA TIME AKTUAL ---
+            // Mengatasi anomali network lag agar perhitungan Coulomb Counting tidak kehilangan data
             if (!is_first_run && last_mqtt_time > 0)
             {
               // Anda bisa pakai dt asli di sini jika ingin waktu yg akurat
@@ -707,7 +724,7 @@ void TaskNetwork(void *pvParameters)
 
             publishComputedData(dt);
 
-            // LOGIKA FIREBASE: Kirim jika drop < 20% (Emergency Override)
+            // LOGIKA PROTEKSI: Putus daya darurat jika SOC < 20%
             if (ekf_x[0] < 0.20)
             {
               if (relayState[1] || relayState[2] || relayState[3])
@@ -745,32 +762,58 @@ void TaskNetwork(void *pvParameters)
           // === PROSES KIRIM KE FIREBASE ===
           if (flag_send_firebase && signupOK && Firebase.ready())
           {
-            flag_send_firebase = false; // Reset bendera
+            flag_send_firebase = false;
+
+            // Mengambil waktu internet
+            struct tm timeinfo;
+            if (!getLocalTime(&timeinfo))
+            {
+              Serial.println("[FIREBASE] Gagal dapat waktu NTP, lewati pengiriman.");
+              continue;
+            }
+
+            // Membuat nama folder berdasarkan Tanggal
+            char datePath[30];
+            strftime(datePath, sizeof(datePath), "/bms_history/%Y-%m-%d", &timeinfo);
+
+            // Menyimpan jam spesifik pada baris data
+            char timeString[20];
+            strftime(timeString, sizeof(timeString), "%H:%M:%S", &timeinfo);
 
             FirebaseJson json;
+            json.set("timestamp", timeString);
+
+            // Data Utama BMS & EKF
             json.set("voltage", bmsData.voltage);
             json.set("current", bmsData.current);
             json.set("power", bmsData.power);
             json.set("soc_ekf", ekf_x[0] * 100.0);
             json.set("soc_cc", soc_cc * 100.0);
+
+            // Data Diagnostik Sel (Battery Health)
             json.set("avg_cell_v", bmsData.avg_cell_v);
             json.set("max_cell_v", bmsData.max_cell_v);
             json.set("min_cell_v", bmsData.min_cell_v);
             json.set("delta_v", bmsData.delta_v);
+
+            // Data Suhu (Safety & Environment)
             json.set("mos_temp", bmsData.mos_temp);
             json.set("bat_temp1", bmsData.bat_temp1);
             json.set("bat_temp2", bmsData.bat_temp2);
             json.set("room_temp", room_temp);
             json.set("room_hum", room_hum);
 
-            // Menulis ke path /bms_realtime (Akan me-replace data lama, cocok untuk Dashboard)
-            if (Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json))
+            // Aksi 1: Menulis status terkini ke Dashboard Realtime
+            Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
+
+            // Aksi 2: Merekam jejak data (akumulatif/tidak menimpa data lama)
+            if (Firebase.RTDB.pushJSON(&fbdo, datePath, &json))
             {
-              Serial.println("[FIREBASE] Data berhasil dikirim (Interval 60s / Darurat)!");
+              Serial.printf("[FIREBASE] Data History tersimpan ke %s\n", datePath);
             }
             else
             {
-              Serial.printf("[FIREBASE] Gagal kirim: %s\n", fbdo.errorReason().c_str());
+              Serial.printf("[FIREBASE] Gagal simpan History: %s\n", fbdo.errorReason().c_str());
             }
           }
         }
