@@ -177,7 +177,10 @@ bool in_confirmed_rest = false;
 
 unsigned long last_mqtt_time = 0;
 unsigned long last_firebase_time = 0;
+unsigned long last_firebase_history_time = 0;
 const unsigned long FIREBASE_INTERVAL = 60000;
+const unsigned long FIREBASE_HISTORY_INTERVAL = 15 * 60 * 1000; // 15 menit
+volatile bool flag_send_history = false;
 
 bool is_first_run = true;
 bool lastWiFiState = false;
@@ -792,17 +795,27 @@ void TaskNetwork(void *pvParameters)
             publishRelayState();
           }
 
-          // === LOGIKA DELAY FIREBASE 60 DETIK ===
+          // === LOGIKA DELAY FIREBASE 60 DETIK (REALTIME) ===
           if (millis() - last_firebase_time >= FIREBASE_INTERVAL)
           {
             last_firebase_time = millis();
             flag_send_firebase = true;
           }
 
-          // === PROSES KIRIM KE FIREBASE ===
-          if (flag_send_firebase && signupOK && Firebase.ready())
+          // === LOGIKA DELAY FIREBASE 15 MENIT (HISTORY) ===
+          if (millis() - last_firebase_history_time >= FIREBASE_HISTORY_INTERVAL)
           {
+            last_firebase_history_time = millis();
+            flag_send_history = true;
+          }
+
+          // === PROSES KIRIM KE FIREBASE ===
+          if ((flag_send_firebase || flag_send_history) && signupOK && Firebase.ready())
+          {
+            bool sendRealtime = flag_send_firebase;
+            bool sendHistory = flag_send_history;
             flag_send_firebase = false;
+            flag_send_history = false;
 
             // Mengambil waktu internet
             struct tm timeinfo;
@@ -844,16 +857,20 @@ void TaskNetwork(void *pvParameters)
             json.set("room_hum", room_hum);
 
             // Aksi 1: Menulis status terkini ke Dashboard Realtime
-            Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
+            if (sendRealtime) {
+                Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
+            }
 
             // Aksi 2: Merekam jejak data (akumulatif/tidak menimpa data lama)
-            if (Firebase.RTDB.pushJSON(&fbdo, datePath, &json))
-            {
-              Serial.printf("[FIREBASE] Data History tersimpan ke %s\n", datePath);
-            }
-            else
-            {
-              Serial.printf("[FIREBASE] Gagal simpan History: %s\n", fbdo.errorReason().c_str());
+            if (sendHistory) {
+                if (Firebase.RTDB.pushJSON(&fbdo, datePath, &json))
+                {
+                  Serial.printf("[FIREBASE] Data History tersimpan ke %s\n", datePath);
+                }
+                else
+                {
+                  Serial.printf("[FIREBASE] Gagal simpan History: %s\n", fbdo.errorReason().c_str());
+                }
             }
           }
         }
