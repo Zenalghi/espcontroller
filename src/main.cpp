@@ -72,10 +72,10 @@ const float lut_soc_ocv[LUT_OCV_SIZE] = {
 // lut_ocv: Array nilai Tegangan Open Circuit (OCV) yang berkorespondensi dengan array lut_soc_ocv di atas.
 // Disesuaikan agar nilainya selalu naik (monotonik) supaya turunan matematisnya tidak pernah nol.
 const float lut_ocv[LUT_OCV_SIZE] = {
-    2.655, 3.050, 3.194, 3.210, 3.220,
-    3.232, 3.245, 3.258, 3.270, 3.282,
-    3.285, 3.287, 3.288, 3.289, 3.291,
-    3.294, 3.300, 3.310, 3.331, 3.385, 3.537};
+    2.6550, 3.0269, 3.1972, 3.2391, 3.2261,
+    3.2242, 3.2424, 3.2625, 3.2758, 3.2835,
+    3.2871, 3.2880, 3.2878, 3.2884, 3.2917,
+    3.2958, 3.2973, 3.3039, 3.3353, 3.4122, 3.5370};
 
 // LUT_ECM_SIZE: Jumlah titik pada tabel parameter model sirkuit ekuivalen (ECM 1-RC Thevenin)
 const int LUT_ECM_SIZE = 9;
@@ -99,20 +99,13 @@ const float lut_c1[LUT_ECM_SIZE] = {
 // =========================================================
 // 4. TUNING NOISE PARAMETER (Matriks Q dan R)
 // =========================================================
-// Matriks Q (Process Noise Covariance): Menunjukkan seberapa "Tidak Percaya" sistem pada model tebakannya sendiri.
-// Q_NOISE_00: Noise proses untuk tebakan SoC. Nilai 1e-7 sangat kecil, artinya kita SANGAT percaya pada hitungan Arus (Coulomb Counting).
-const float Q_NOISE_00 = 1e-7;
-// Q_NOISE_11: Noise proses untuk tegangan kapasitor (Vc1). Memberikan sedikit toleransi kelenturan pada dinamika model.
-const float Q_NOISE_11 = 5e-4;
+const float Q_NOISE_00 = 2e-6f;
+const float Q_NOISE_11 = 1e-1f;
+const float R_BASE = 1e-4f;
 
-// Matriks R (Measurement Noise Covariance): Menunjukkan seberapa "Tidak Percaya" sistem pada sensor Tegangan.
-// Semakin besar nilai R, EKF akan semakin mengabaikan tegangan saat mengoreksi SoC (Mencegah lonjakan koreksi berlebih).
-// R_NOISE_CHARGE: Nilai besar (skeptis) karena saat di-charge tegangan sering palsu akibat resistansi.
-const float R_NOISE_CHARGE = 0.035;
-// R_NOISE_DISCHARGE: Nilai sedang, sensor tegangan cukup bisa diandalkan saat pengosongan.
-const float R_NOISE_DISCHARGE = 0.004;
-// R_NOISE_REST: Nilai sangat kecil (Sangat percaya sensor), karena saat arus nol, tegangan terminal = tegangan murni OCV.
-const float R_NOISE_REST = 0.0008;
+const float REST_CURRENT_THRESH = 0.05f; // A - di bawah ini = rest
+const int REST_SETTLE_S = 30;            // detik konfirmasi rest sebelum R_REST aktif
+const float R_REST = 1e-4f;              // agresif saat confirmed rest (sama R_BASE)
 
 // =========================================================
 // 5. VARIABEL GLOBAL IPC, STATE ESTIMATION, & UI
@@ -176,6 +169,10 @@ float v_pred_last = 0.0;
 // dt_last: Menyimpan selisih waktu antar perhitungan
 float dt_last = 0.0;
 
+// Rest detection state
+int rest_counter_s = 0;
+bool in_confirmed_rest = false;
+
 unsigned long last_mqtt_time = 0;
 unsigned long last_firebase_time = 0;
 const unsigned long FIREBASE_INTERVAL = 60000;
@@ -207,17 +204,16 @@ float interpolate1D(float x, const float *x_data, const float *y_data, int size)
 }
 
 // get_dOCV_dSOC: Mencari turunan matematis dari kurva OCV terhadap SoC (Matriks Jacobian)
-// Tujuan: Memberitahu EKF seberapa curam kurva tegangan baterai pada titik SoC saat ini.
-// Semakin curam kurvanya, EKF akan semakin sensitif mengoreksi SoC.
 float get_dOCV_dSOC(float soc)
 {
-  float delta = 0.001; // Menggeser sedikit (0.1%) ke depan dan belakang untuk mencari kemiringan
-  float s_high = min(soc + delta, 1.0f);
-  float s_low = max(soc - delta, 0.0f);
-  float ocv_high = interpolate1D(s_high, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
-  float ocv_low = interpolate1D(s_low, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
-  float derivative = (ocv_high - ocv_low) / (s_high - s_low); // Rumus gradien (y2-y1)/(x2-x1)
-  return max(derivative, 0.05f);                              // Kemiringan minimum dicegah bernilai nol agar EKF tidak lumpuh
+  soc = constrain(soc, 0.0f, 1.0f);
+  float h = 0.005f;
+  float soc_lo = max(soc - h, 0.0f);
+  float soc_hi = min(soc + h, 1.0f);
+  float dSOC = soc_hi - soc_lo;
+  if (dSOC < 1e-6f)
+    return 0.0f;
+  return (interpolate1D(soc_hi, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE) - interpolate1D(soc_lo, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE)) / dSOC;
 }
 
 // =========================================================
@@ -253,74 +249,95 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   // soc_pred: EKF menebak nilai SoC berikutnya menggunakan rumus Coulomb Counting.
   float soc_pred = constrain(soc_prev - (I_meas * dt / Q_COULOMB), 0.0, 1.0);
   // alpha & vc1_pred: EKF menebak nilai tegangan kapasitor (Vc1) berikutnya berdasarkan laju peluruhan RC.
-  float alpha = (dt > 0) ? exp(-dt / tau) : 1.0f;
+  float alpha = (dt > 0) ? expf(-dt / tau) : 1.0f;
   float vc1_pred = (alpha * vc1_prev) + (R1 * (1.0f - alpha) * I_meas);
 
   // Memasukkan sementara tebakan awal ke dalam State Vector.
   ekf_x[0] = soc_pred;
   ekf_x[1] = vc1_pred;
 
-  // P_pred: Prediksi Matriks Keraguan. Keraguan sistem akan SELALU BERTAMBAH di tahap tebakan
-  // karena masuknya nilai 'Q_NOISE' (seiring berjalannya waktu, sistem makin tidak yakin tebakannya benar).
+  // Prediksi Covariance P (decoupled)
   float P_pred[2][2];
   P_pred[0][0] = ekf_P[0][0] + Q_NOISE_00;
-  P_pred[0][1] = ekf_P[0][1] * alpha;
-  P_pred[1][0] = ekf_P[1][0] * alpha;
+  P_pred[0][1] = 0.0f;
+  P_pred[1][0] = 0.0f;
   P_pred[1][1] = (alpha * alpha * ekf_P[1][1]) + Q_NOISE_11;
 
-  // R_eff: Logika Noise Adaptif (Menentukan nilai sensor mana yang sedang bisa dipercaya)
-  float R_eff;
-  if (fabsf(I_meas) < 0.05f)
+  float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
+
+  // Dynamic R: trust measurement proportional to OCV slope steepness
+  float R_dynamic;
+  if (in_confirmed_rest)
   {
-    R_eff = R_NOISE_REST; // Arus nyaris 0, V = OCV asli, sensor tegangan sangat dipercaya.
+    R_dynamic = R_REST;
   }
-  else if (I_meas < 0.0f)
+  else if (abs(I_meas) < 0.05f)
   {
-    R_eff = R_NOISE_CHARGE; // Arus masuk, tegangan semu naik, sensor kurang dipercaya.
+    R_dynamic = R_BASE / (abs(dOCV_dSOC) + 1e-3f);
   }
   else
   {
-    R_eff = R_NOISE_DISCHARGE; // Arus keluar, lumayan bisa diandalkan.
+    R_dynamic = R_BASE / (abs(dOCV_dSOC) + 1e-4f);
   }
+  R_dynamic = constrain(R_dynamic, 0.0001f, 10.0f);
 
   // === TAHAP 2: KOREKSI (A POSTERIORI / PERBAIKAN TEBAKAN) ==========================
 
   // OCV_pred: Mencari nilai Open Circuit Voltage berdasar tebakan SoC awal (dari lookup table OCV).
   float OCV_pred = interpolate1D(soc_pred, lut_soc_ocv, lut_ocv, LUT_OCV_SIZE);
-  // dOCV_dSOC: Meminta nilai kemiringan kurva (gradient) saat ini.
-  float dOCV_dSOC = get_dOCV_dSOC(soc_pred);
-
   // V_pred: EKF menebak TEGANGAN FISIK sensor.
   // Rumus ECM = Tegangan murni (OCV) dikurangi drop kapasitor (Vc1) dikurangi drop resistor ohmik (I*R0)
   float V_pred = OCV_pred - vc1_pred - (I_meas * R0);
   v_pred_last = V_pred;
 
-  // Matriks H (h0 & h1): Matriks Jacobian observasi, menjembatani perhitungan State (SoC) menjadi Prediksi Sensor (V_pred).
-  float h0 = dOCV_dSOC;
+  // Matriks H (h0 & h1): Matriks Jacobian observasi
+  float h0 = fabsf(dOCV_dSOC) + 1e-4f;
   float h1 = -1.0f;
 
-  // S (Covariance Inovasi): Mengukur total semua keraguan (Keraguan Tebakan + Noise Sensor R_eff).
+  // S (Covariance Inovasi): Mengukur total semua keraguan
   float S = (h0 * h0 * P_pred[0][0]) + (h0 * h1 * P_pred[0][1]) +
-            (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_eff;
+            (h1 * h0 * P_pred[1][0]) + (h1 * h1 * P_pred[1][1]) + R_dynamic;
+  if (S < 1e-9f)
+    S = 1e-9f;
 
   // K (Kalman Gain): INTI DARI ALGORITMA EKF.
-  // Matriks ini memutuskan "Siapa yang lebih bisa dipercaya? Hitungan Coulomb Counting atau Sensor Tegangan?".
   float K[2];
   K[0] = ((P_pred[0][0] * h0) + (P_pred[0][1] * h1)) / S;
   K[1] = ((P_pred[1][0] * h0) + (P_pred[1][1] * h1)) / S;
 
-  // error (Inovasi Tegangan): Selisih antara Tegangan aktual dari sensor dikurangi Tebakan Tegangan EKF (V_pred).
-  float error = V_meas - V_pred;
+  float innov = V_meas - V_pred;
 
-  // FINAL KOREKSI: EKF memperbaiki SoC tebakan awalnya.
-  // Rumus: SoC Baru = SoC Tebakan + (Kalman Gain * Error Tegangan)
-  ekf_x[0] = constrain(ekf_x[0] + (K[0] * error), 0.0, 1.0);
-  ekf_x[1] = ekf_x[1] + (K[1] * error);
+  // --- SOFT DEADBAND (1mV) + CORRECTION CAP (10% SoC per step) ---
+  float K0_eff = K[0];
+  const float DEADBAND = 0.001f;      // 1 mV
+  const float MAX_CORRECTION = 0.10f; // maks 10% SoC per langkah
+
+  if (fabsf(innov) < DEADBAND)
+  {
+    K0_eff *= (fabsf(innov) / DEADBAND);
+  }
+
+  // Apply correction with cap
+  float soc_correction = K0_eff * innov;
+  if (soc_correction > MAX_CORRECTION)
+    soc_correction = MAX_CORRECTION;
+  if (soc_correction < -MAX_CORRECTION)
+    soc_correction = -MAX_CORRECTION;
+
+  // Koreksi State x = x + correction (capped)
+  ekf_x[0] = max(0.0f, min(1.0f, ekf_x[0] + soc_correction));
+  ekf_x[1] += K[1] * innov;
+
+  // Cap Vc1
+  if (ekf_x[1] > 0.5f)
+    ekf_x[1] = 0.5f;
+  if (ekf_x[1] < -0.5f)
+    ekf_x[1] = -0.5f;
 
   // I_KH & Temp: Variabel matrix pembantu untuk kalkulasi Joseph Form Update.
   float I_KH[2][2];
-  I_KH[0][0] = 1.0f - (K[0] * h0);
-  I_KH[0][1] = -(K[0] * h1);
+  I_KH[0][0] = 1.0f - (K0_eff * h0);
+  I_KH[0][1] = -(K0_eff * h1);
   I_KH[1][0] = -(K[1] * h0);
   I_KH[1][1] = 1.0f - (K[1] * h1);
 
@@ -331,11 +348,16 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   Temp[1][1] = I_KH[1][0] * P_pred[0][1] + I_KH[1][1] * P_pred[1][1];
 
   // ekf_P (Joseph Form Update): Memperbarui Matriks Keraguan (P).
-  // Setelah EKF mengoreksi status menggunakan sensor tegangan, "Keraguannya" (P) akan menurun (menjadi lebih yakin untuk putaran/loop selanjutnya).
-  ekf_P[0][0] = Temp[0][0] * I_KH[0][0] + Temp[0][1] * I_KH[0][1] + (K[0] * K[0] * R_eff);
-  ekf_P[0][1] = Temp[0][0] * I_KH[1][0] + Temp[0][1] * I_KH[1][1] + (K[0] * K[1] * R_eff);
-  ekf_P[1][0] = Temp[1][0] * I_KH[0][0] + Temp[1][1] * I_KH[0][1] + (K[1] * K[0] * R_eff);
-  ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_eff);
+  ekf_P[0][0] = Temp[0][0] * I_KH[0][0] + Temp[0][1] * I_KH[0][1] + (K0_eff * K0_eff * R_dynamic);
+  ekf_P[0][1] = Temp[0][0] * I_KH[1][0] + Temp[0][1] * I_KH[1][1] + (K0_eff * K[1] * R_dynamic);
+  ekf_P[1][0] = Temp[1][0] * I_KH[0][0] + Temp[1][1] * I_KH[0][1] + (K[1] * K0_eff * R_dynamic);
+  ekf_P[1][1] = Temp[1][0] * I_KH[1][0] + Temp[1][1] * I_KH[1][1] + (K[1] * K[1] * R_dynamic);
+
+  // Symmetry enforcement & positivity floor
+  ekf_P[0][1] = (ekf_P[0][1] + ekf_P[1][0]) * 0.5f;
+  ekf_P[1][0] = ekf_P[0][1];
+  ekf_P[0][0] = max(ekf_P[0][0], 1e-10f);
+  ekf_P[1][1] = max(ekf_P[1][1], 1e-10f);
 
   // ==============================================================
   // KALKULASI UTILISASI MEMORI DAN CPU
@@ -360,7 +382,7 @@ void runEKFStep(float I_meas, float V_meas, float dt)
   Serial.printf("│ 1. Input Sensor : V_meas = %.3f V | I = %.2f A\n", V_meas, I_meas);
   Serial.printf("│ 2. Open-Loop CC : SOC_CC = %.2f %%\n", soc_cc * 100);
   Serial.printf("│ 3. State Pred   : V_pred = %.3f V | SOC = %.2f %%\n", V_pred, soc_pred * 100);
-  Serial.printf("│ 4. Error (Inov) : V_meas - V_pred = %+.4f V\n", error);
+  Serial.printf("│ 4. Error (Inov) : V_meas - V_pred = %+.4f V\n", innov);
   Serial.printf("│ 5. Kalman Gain  : K[0] = %.5f | K[1] = %.5f\n", K[0], K[1]);
   Serial.printf("│ 6. Output Final : SOC_EKF Terkoreksi = %.2f %%\n", ekf_x[0] * 100);
   Serial.println("├──────────────────────────────────────────────┤");
@@ -491,6 +513,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         // Set nilai CC dan EKF sesuai dengan SOC asli bawaan Jikong (dibagi 100 agar skala 0.0 - 1.0)
         soc_cc = soc_jk / 100.0;
         ekf_x[0] = soc_cc;
+        ekf_x[1] = 0.0;
+        ekf_P[0][0] = 0.01f;
+        ekf_P[0][1] = 0.0f;
+        ekf_P[1][0] = 0.0f;
+        ekf_P[1][1] = 0.001f;
         is_soc_initialized = true;
         Serial.println("\n=================================================");
         Serial.printf("[INIT] AUTO-CALIBRATION BERHASIL!\n");
@@ -690,6 +717,19 @@ void TaskNetwork(void *pvParameters)
             is_first_run = false;
             last_mqtt_time = now;
             dt_last = dt;
+
+            // --- Rest detection: count consecutive seconds of near-zero current ---
+            if (fabsf(bmsData.current) < REST_CURRENT_THRESH)
+            {
+              rest_counter_s += (int)dt;
+              if (rest_counter_s >= REST_SETTLE_S)
+                in_confirmed_rest = true;
+            }
+            else
+            {
+              rest_counter_s = 0;
+              in_confirmed_rest = false;
+            }
 
             // 1. Pengukuran Beban Prosesor (Waktu Eksekusi EKF)
             unsigned long ekf_start_time = micros();
