@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFiManager.h>
+#include <ArduinoOTA.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -114,6 +115,8 @@ const float R_REST = 1e-4f;              // agresif saat confirmed rest (sama R_
 volatile bool portalActive = false;
 volatile bool requestPortalOpen = false;
 volatile bool requestPortalClose = false;
+volatile bool ota_updating = false;
+volatile int ota_progress_percent = 0;
 
 // === FLAG UNTUK MENJAGA STABILITAS MQTT BUFFER ===
 volatile bool flag_run_ekf = false;
@@ -476,7 +479,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   String pageCmdTopic = String(mqtt_prefix) + "/display/page/command";
   if (topicStr == pageCmdTopic)
   {
-    if (!portalActive) // Hanya bisa ganti jika tidak sedang setup
+    if (!portalActive && !ota_updating) // Hanya bisa ganti jika tidak sedang setup/OTA
     {
       if (msg == "NEXT")
       {
@@ -497,7 +500,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
     else
     {
-      Serial.println("\n[MQTT] Change Page rejected (In Setup Mode)");
+      Serial.println("\n[MQTT] Change Page rejected (In Setup/OTA Mode)");
     }
     return;
   }
@@ -648,6 +651,19 @@ void TaskNetwork(void *pvParameters)
   signupOK = true; // Langsung di-flag true karena test mode aktif
   Serial.println("[FIREBASE] Mode Publik (Test Mode) Aktif. Mengabaikan Otentikasi.");
 
+  // --- KONFIGURASI ARDUINO OTA ---
+  ArduinoOTA.setHostname("esp-bms-ekf");
+
+  ArduinoOTA.onStart([]()
+                     { ota_updating = true; ota_progress_percent = 0; });
+  ArduinoOTA.onEnd([]()
+                   { delay(500); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                        { ota_progress_percent = (progress / (total / 100)); });
+  ArduinoOTA.onError([](ota_error_t error)
+                     { ota_updating = false; });
+
+  ArduinoOTA.begin();
 
   // Membesarkan Buffer dan Waktu Tunggu MQTT agar kebal lag (120 Detik)
   mqtt.setBufferSize(512);
@@ -681,9 +697,9 @@ void TaskNetwork(void *pvParameters)
     }
     else if (currentWiFiState)
     {
-      // OTA removed
+      ArduinoOTA.handle();
 
-      if (true) // formerly if (!ota_updating)
+      if (!ota_updating)
       {
         if (!mqtt.connected())
         {
@@ -841,20 +857,22 @@ void TaskNetwork(void *pvParameters)
             json.set("room_hum", room_hum);
 
             // Aksi 1: Menulis status terkini ke Dashboard Realtime
-            if (sendRealtime) {
-                Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
+            if (sendRealtime)
+            {
+              Firebase.RTDB.setJSON(&fbdo, "/bms_realtime", &json);
             }
 
             // Aksi 2: Merekam jejak data (akumulatif/tidak menimpa data lama)
-            if (sendHistory) {
-                if (Firebase.RTDB.pushJSON(&fbdo, datePath, &json))
-                {
-                  Serial.printf("[FIREBASE] Data History tersimpan ke %s\n", datePath);
-                }
-                else
-                {
-                  Serial.printf("[FIREBASE] Gagal simpan History: %s\n", fbdo.errorReason().c_str());
-                }
+            if (sendHistory)
+            {
+              if (Firebase.RTDB.pushJSON(&fbdo, datePath, &json))
+              {
+                Serial.printf("[FIREBASE] Data History tersimpan ke %s\n", datePath);
+              }
+              else
+              {
+                Serial.printf("[FIREBASE] Gagal simpan History: %s\n", fbdo.errorReason().c_str());
+              }
             }
           }
         }
@@ -876,6 +894,22 @@ void bacaSensorAHT()
     room_temp = temp.temperature;
     room_hum = humidity.relative_humidity;
   }
+}
+
+// Menggambar Layar saat proses OTA berlangsung
+void drawOTAScreen(int percent)
+{
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print("==== OTA UPDATE ====");
+  display.drawLine(0, 10, 128, 10, WHITE);
+  display.setCursor(0, 20);
+  display.printf("Downloading: %d %%", percent);
+  display.drawRect(14, 37, 100, 10, WHITE);
+  display.fillRect(14, 37, percent, 10, WHITE);
+  display.setCursor(0, 56);
+  display.print("Please wait...");
+  display.display();
 }
 
 void updateLayar()
@@ -964,7 +998,7 @@ void updateLayar()
     display.setCursor(0, 36);
     display.printf("EKF dt: %.2f sec", dt_last);
     display.setCursor(0, 46);
-    display.print("OTA  : Disabled");
+    display.print("OTA  : Ready");
   }
   else if (currentPage == 5)
   {
@@ -1065,7 +1099,7 @@ void printOledToSerial()
     Serial.print("IP   :");
     Serial.println(WiFi.localIP());
     Serial.printf("EKF dt:%.2f sec\n", dt_last);
-    Serial.println("OTA  :Disabled");
+    Serial.println("OTA  :Ready");
   }
   else if (currentPage == 5)
   {
@@ -1125,8 +1159,8 @@ void cekTombolSmart()
     {
       if (!longPressTriggered && (millis() - waktuTekan < 1000))
       {
-        // Kunci navigasi halaman jika portal aktif
-        if (!portalActive)
+        // Kunci navigasi halaman jika portal aktif ATAU OTA berjalan
+        if (!portalActive && !ota_updating)
         {
           currentPage = currentPage + 1;
           if (currentPage > MAX_PAGES)
@@ -1137,7 +1171,7 @@ void cekTombolSmart()
         }
         else
         {
-          Serial.println("\n[BUTTON] Short Press ignored because it is in Setup Mode");
+          Serial.println("\n[BUTTON] Short Press ignored because it is in Setup/OTA Mode");
         }
       }
       sedangDitekan = false;
@@ -1176,6 +1210,19 @@ void setup()
 void loop()
 {
   static unsigned long waktuTerakhir = 0;
+  static int last_drawn_percent = -1;
+
+  // Jika sedang OTA, alihkan fokus UI ke Progress Bar OTA (DIJALANKAN DI CORE 1)
+  if (ota_updating)
+  {
+    if (ota_progress_percent != last_drawn_percent)
+    {
+      last_drawn_percent = ota_progress_percent;
+      drawOTAScreen(ota_progress_percent);
+    }
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+    return; // Keluar dari loop agar tidak update halaman lain
+  }
 
   if (millis() - waktuTerakhir >= 500)
   {
