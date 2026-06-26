@@ -944,7 +944,7 @@ void updateLayar()
     display.setCursor(0, 16);
     display.printf("Volt : %.1fV | %.1fA", bmsData.voltage, bmsData.current);
     display.setCursor(0, 26);
-    display.printf("SOC  : CC:%.0f%% EKF:%.0f%%", soc_cc * 100, ekf_x[0] * 100);
+    display.printf("SOC  : %.0f%%", ekf_x[0] * 100);
     display.setCursor(0, 36);
     display.printf(" Relay1:%-2s| Relay2:%s", relayState[0] ? "ON" : "X", relayState[1] ? "ON" : "X");
     display.setCursor(0, 46);
@@ -965,7 +965,7 @@ void updateLayar()
     display.setCursor(0, 36);
     display.printf("Delta(dV): %.3f V", bmsData.delta_v);
     display.setCursor(0, 46);
-    display.printf("Temp MOS : %.1f C", bmsData.mos_temp);
+    display.printf("BMS Temp MOS : %.1f C", bmsData.mos_temp);
     display.setCursor(0, 56);
     display.printf("Bat T1:%.1f T2:%.1f", bmsData.bat_temp1, bmsData.bat_temp2);
   }
@@ -977,28 +977,28 @@ void updateLayar()
     display.drawLine(0, 10, 128, 10, WHITE);
     display.setCursor(0, 16);
     display.printf("Power  : %.0f W", bmsData.power);
-    display.setCursor(0, 26);
-    display.printf("Room T : %.1f C", room_temp);
-    display.setCursor(0, 36);
-    display.printf("Room H : %.1f %%", room_hum);
-    display.setCursor(0, 46);
-    display.print(aht_status ? "AHT10  : OK" : "AHT10  : ERROR");
+    // display.setCursor(0, 26);
+    // display.printf("Room T : %.1f C", room_temp);
+    // display.setCursor(0, 36);
+    // display.printf("Room H : %.1f %%", room_hum);
+    // display.setCursor(0, 46);
+    // display.print(aht_status ? "AHT10  : OK" : "AHT10  : ERROR");
   }
   else if (currentPage == 4)
   {
     // Halaman 4: Network & System
     display.setCursor(0, 0);
-    display.print("=== NETWORK & SYS ===");
+    display.print("====== NETWORK ======");
     display.drawLine(0, 10, 128, 10, WHITE);
     display.setCursor(0, 16);
     display.printf("WiFi : %s", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "Disconnected");
     display.setCursor(0, 26);
     display.print("IP   :");
     display.print(WiFi.localIP());
-    display.setCursor(0, 36);
-    display.printf("EKF dt: %.2f sec", dt_last);
-    display.setCursor(0, 46);
-    display.print("OTA  : Ready");
+    // display.setCursor(0, 36);
+    // display.printf("EKF dt: %.2f sec", dt_last);
+    // display.setCursor(0, 46);
+    // display.print("OTA  : Ready");
   }
   else if (currentPage == 5)
   {
