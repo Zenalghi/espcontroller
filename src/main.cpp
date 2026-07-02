@@ -123,6 +123,7 @@ volatile bool flag_run_ekf = false;
 volatile bool flag_publish_relay = false;
 volatile bool flag_send_firebase = false;
 volatile bool flag_soc_critical_sent = false;
+volatile bool is_first_ekf_sent = false;
 
 // Variabel Global untuk Menampilkan Performa di Layar
 volatile float perf_ekf_time_ms = 0.0;
@@ -766,6 +767,17 @@ void TaskNetwork(void *pvParameters)
             perf_ram_used_pct = (perf_ram_used_bytes / (float)perf_ram_total_bytes) * 100.0;
 
             publishComputedData(dt);
+
+            // Kirim EKF pertama kali langsung ke realtime dan history Firebase
+            if (!is_first_ekf_sent)
+            {
+              is_first_ekf_sent = true;
+              flag_send_firebase = true;
+              flag_send_history = true;
+              last_firebase_time = millis();
+              last_firebase_history_time = millis();
+              Serial.println("[FIREBASE] Menandai pengiriman EKF pertama kali ke Realtime & History.");
+            }
 
             // LOGIKA PROTEKSI: Putus daya darurat jika SOC < 20%
             if (ekf_x[0] < 0.20)
